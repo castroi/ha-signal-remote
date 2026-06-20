@@ -1,0 +1,45 @@
+# Alias table: maps household Hebrew speech -> HA entity_ids.
+# Adding a device = one row here + HA config. No bridge code change (design §7).
+#
+# verbs: canonical action -> accepted normalized Hebrew variants (exact + prefix match only).
+# entities: canonical room/light name -> { type, entity_id, completion_timeout_ms, aliases }.
+# scopes: bare scope words -> the set of entities they expand to.
+
+verbs:
+  open: ["פתח", "תפתח", "להרים", "הרם"]
+  close: ["סגור", "תסגור", "להוריד", "הורד"]
+  stop: ["עצור", "תעצור", "הפסק"]
+  on: ["הדלק", "תדליק", "להדליק"]
+  off: ["כבה", "תכבה", "לכבות"]
+
+entities:
+  salon:
+    type: cover
+    entity_id: cover.living_room
+    completion_timeout_ms: 30000
+    aliases: ["סלון"]
+  kitchen:
+    type: cover
+    entity_id: cover.kitchen
+    completion_timeout_ms: 30000
+    aliases: ["מטבח"]
+  kids_room:
+    type: cover
+    entity_id: cover.kids_room
+    completion_timeout_ms: 35000
+    aliases: ["חדר ילדים", "ילדים"]
+  parents_room:
+    type: cover
+    entity_id: cover.parents_room
+    completion_timeout_ms: 35000
+    aliases: ["חדר הורים", "הורים"]
+  garden_light:
+    type: light
+    entity_id: light.garden
+    completion_timeout_ms: 5000
+    aliases: ["גינה"]
+
+scopes:
+  all_covers:
+    word: "תריסים"
+    expands_to_type: cover

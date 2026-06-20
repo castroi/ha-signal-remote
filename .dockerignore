@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.github
+**/*.test.ts
+coverage
+*.log
+.env
+.env.*
+docs
+plans
+src/**/__fixtures__

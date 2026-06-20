@@ -1,0 +1,45 @@
+# Hardened deployment for the home-control bridge (design §3, §6 A05).
+#
+# Properties:
+# - Private bridge network; NO published host ports (bridge is outbound-only).
+# - Non-root, read-only rootfs + tmpfs for writable scratch, no-new-privileges,
+#   cap_drop ALL.
+# - Config mounted read-only; secrets via env only (never baked into the image).
+#
+# signal-cli-rest-api and Home Assistant are expected to be reachable on the same
+# private network / localhost; they are referenced here as external for clarity.
+
+services:
+  home-control-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: home-control-bridge
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - bridge-net
+    # No `ports:` — the bridge publishes nothing to the host/LAN.
+    environment:
+      HA_BASE_URL: ${HA_BASE_URL}
+      SIGNAL_API_URL: ${SIGNAL_API_URL}
+      BOT_NUMBER: ${BOT_NUMBER}
+      # Secrets — provide via an env file or your secrets manager, never commit.
+      HA_TOKEN: ${HA_TOKEN}
+      ALLOWLIST_UUIDS: ${ALLOWLIST_UUIDS}
+      AUDIT_SALT: ${AUDIT_SALT}
+    volumes:
+      # Alias table mounted read-only (design §6 A05).
+      - ./config/aliases.yaml:/app/config/aliases.yaml:ro
+
+networks:
+  bridge-net:
+    driver: bridge
+    internal: false

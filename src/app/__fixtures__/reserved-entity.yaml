@@ -1,0 +1,16 @@
+verbs:
+  open: ["פתח"]
+  close: ["סגור"]
+
+entities:
+  bad_room:
+    type: cover
+    entity_id: cover.bad
+    completion_timeout_ms: 30000
+    # "סטטוס" is a reserved control word and must be rejected as an entity alias.
+    aliases: ["סטטוס"]
+
+scopes:
+  all_covers:
+    word: "תריסים"
+    expands_to_type: cover
