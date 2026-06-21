@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Signal -> Home Assistant cover/light control bridge",
   "engines": {
-    "node": ">=20 <21"
+    "node": ">=20.19 <21"
   },
   "packageManager": "pnpm@9.15.9",
   "scripts": {
@@ -23,10 +23,11 @@
   "devDependencies": {
     "@types/node": "^20.17.10",
     "@types/ws": "^8.5.13",
-    "@typescript-eslint/eslint-plugin": "^8.18.0",
-    "@typescript-eslint/parser": "^8.18.0",
-    "eslint": "^8.57.1",
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.5.0",
+    "globals": "^17.6.0",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.61.1",
     "vite": "^7.1.12",
     "vitest": "^4.1.9"
   }
