@@ -1,0 +1,65 @@
+# DEV stack for testing the home-control bridge WITHOUT a Raspberry Pi, real
+# Shelly hardware, or real Signal.
+#
+#   - mock-signal   : stands in for signal-cli-rest-api (see dev/mock-signal-cli.mjs)
+#   - homeassistant : real HA with simulated covers + a garden light (dev/homeassistant)
+#   - bridge        : the actual home-control bridge under test
+#
+# Usage (see docs/dev-testing.md for the full runbook):
+#   1. cp dev/.env.dev.example .env.dev   and fill HA_TOKEN after step 3
+#   2. docker compose -f docker-compose.dev.yml up -d homeassistant mock-signal
+#   3. open http://127.0.0.1:8123 , finish onboarding, create a long-lived token,
+#      paste it into .env.dev as HA_TOKEN
+#   4. docker compose -f docker-compose.dev.yml --profile bridge up -d bridge
+#   5. drive tests:  curl -XPOST 127.0.0.1:8099/inject -d '{"sourceUuid":"dev-uuid-1","message":"סגור סלון"}'
+#      see replies:  curl 127.0.0.1:8099/sent
+#
+# Gate 1 (replay-timestamp) is NOT covered here — it needs real bbernhard on the
+# deployment network. The other 8 gates are reproducible against this stack.
+
+services:
+  mock-signal:
+    image: node:20-alpine
+    working_dir: /app
+    command: ["node", "dev/mock-signal-cli.mjs"]
+    environment:
+      PORT: "8080"
+    volumes:
+      - ./:/app
+    ports:
+      # Exposed to the host so you can /inject and read /sent.
+      - "127.0.0.1:8099:8080"
+    networks: [dev-net]
+    restart: unless-stopped
+
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    volumes:
+      - ./dev/homeassistant:/config
+    ports:
+      - "127.0.0.1:8123:8123"
+    networks: [dev-net]
+    restart: unless-stopped
+
+  bridge:
+    # Behind a profile so it does not crash-loop before HA_TOKEN exists.
+    profiles: [bridge]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.dev
+    environment:
+      HA_BASE_URL: http://homeassistant:8123
+      SIGNAL_API_URL: http://mock-signal:8080
+      ALIAS_PATH: /app/config/aliases.yaml
+    volumes:
+      # Dev alias table — entity_ids already match dev/homeassistant covers.
+      - ./config/aliases.example.yaml:/app/config/aliases.yaml:ro
+    networks: [dev-net]
+    depends_on: [homeassistant, mock-signal]
+    restart: unless-stopped
+
+networks:
+  dev-net:
+    driver: bridge

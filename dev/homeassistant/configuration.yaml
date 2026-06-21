@@ -1,0 +1,173 @@
+# Home Assistant DEV configuration for testing the home-control bridge.
+#
+# Provides the five entities the alias table expects — four simulated roller
+# covers and a garden light — with NO real Shelly hardware. The covers report
+# real `opening`/`closing` → `open`/`closed` transitions over a short travel
+# time, so the bridge's two-stage feedback, completion timeouts, preemption and
+# fail-closed paths all exercise against genuine state_changed events on the HA
+# WebSocket.
+#
+# Covers do NOT report a `stopped` state (HA covers never do) — `stop` leaves
+# them `open`/`closed`. That mirrors the §7 hardware caveat: real stop-completion
+# semantics depend on the Shelly generation and must be verified on hardware.
+
+default_config:
+
+input_select:
+  living_room_cover:
+    name: Living Room Cover
+    options: [open, closed, opening, closing]
+    initial: closed
+  kitchen_cover:
+    name: Kitchen Cover
+    options: [open, closed, opening, closing]
+    initial: closed
+  kids_room_cover:
+    name: Kids Room Cover
+    options: [open, closed, opening, closing]
+    initial: closed
+  parents_room_cover:
+    name: Parents Room Cover
+    options: [open, closed, opening, closing]
+    initial: closed
+
+input_boolean:
+  garden_light:
+    name: Garden Light
+
+# Modern template integration (HA migrated cover/light template here from the
+# legacy `cover:`/`light:` platform style). Names slugify to the entity_ids the
+# alias table expects: cover.living_room, cover.kitchen, cover.kids_room,
+# cover.parents_room, light.garden.
+template:
+  - cover:
+      - name: Living Room
+        unique_id: sim_living_room
+        state: "{{ states('input_select.living_room_cover') }}"
+        open_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.living_room_cover }
+            data: { option: opening }
+        close_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.living_room_cover }
+            data: { option: closing }
+        stop_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.living_room_cover }
+            data: { option: open }
+      - name: Kitchen
+        unique_id: sim_kitchen
+        state: "{{ states('input_select.kitchen_cover') }}"
+        open_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.kitchen_cover }
+            data: { option: opening }
+        close_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.kitchen_cover }
+            data: { option: closing }
+        stop_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.kitchen_cover }
+            data: { option: open }
+      - name: Kids Room
+        unique_id: sim_kids_room
+        state: "{{ states('input_select.kids_room_cover') }}"
+        open_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.kids_room_cover }
+            data: { option: opening }
+        close_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.kids_room_cover }
+            data: { option: closing }
+        stop_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.kids_room_cover }
+            data: { option: open }
+      - name: Parents Room
+        unique_id: sim_parents_room
+        state: "{{ states('input_select.parents_room_cover') }}"
+        open_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.parents_room_cover }
+            data: { option: opening }
+        close_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.parents_room_cover }
+            data: { option: closing }
+        stop_cover:
+          - action: input_select.select_option
+            target: { entity_id: input_select.parents_room_cover }
+            data: { option: open }
+  - light:
+      - name: Garden
+        unique_id: sim_garden
+        state: "{{ is_state('input_boolean.garden_light', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target: { entity_id: input_boolean.garden_light }
+        turn_off:
+          - action: input_boolean.turn_off
+            target: { entity_id: input_boolean.garden_light }
+
+# One automation per cover finishes the travel. mode: restart so a reversing
+# command (preemption) cancels the in-flight travel; the post-delay guard means a
+# `stop` (which sets open/closed directly) is never overwritten by a stale finish.
+automation:
+  - alias: Finish living_room travel
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: input_select.living_room_cover
+        to: [opening, closing]
+    action:
+      - variables: { dir: "{{ trigger.to_state.state }}" }
+      - delay: { seconds: 6 }
+      - condition: "{{ states('input_select.living_room_cover') == dir }}"
+      - action: input_select.select_option
+        target: { entity_id: input_select.living_room_cover }
+        data: { option: "{{ 'open' if dir == 'opening' else 'closed' }}" }
+
+  - alias: Finish kitchen travel
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: input_select.kitchen_cover
+        to: [opening, closing]
+    action:
+      - variables: { dir: "{{ trigger.to_state.state }}" }
+      - delay: { seconds: 6 }
+      - condition: "{{ states('input_select.kitchen_cover') == dir }}"
+      - action: input_select.select_option
+        target: { entity_id: input_select.kitchen_cover }
+        data: { option: "{{ 'open' if dir == 'opening' else 'closed' }}" }
+
+  - alias: Finish kids_room travel
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: input_select.kids_room_cover
+        to: [opening, closing]
+    action:
+      - variables: { dir: "{{ trigger.to_state.state }}" }
+      - delay: { seconds: 8 }
+      - condition: "{{ states('input_select.kids_room_cover') == dir }}"
+      - action: input_select.select_option
+        target: { entity_id: input_select.kids_room_cover }
+        data: { option: "{{ 'open' if dir == 'opening' else 'closed' }}" }
+
+  - alias: Finish parents_room travel
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: input_select.parents_room_cover
+        to: [opening, closing]
+    action:
+      - variables: { dir: "{{ trigger.to_state.state }}" }
+      - delay: { seconds: 8 }
+      - condition: "{{ states('input_select.parents_room_cover') == dir }}"
+      - action: input_select.select_option
+        target: { entity_id: input_select.parents_room_cover }
+        data: { option: "{{ 'open' if dir == 'opening' else 'closed' }}" }

@@ -4,6 +4,7 @@ dist/
 .env
 .env.*
 !.env.example
+!dev/.env.dev.example
 coverage/
 .DS_Store
 
@@ -12,3 +13,8 @@ coverage/
 
 # Live per-deployment alias table (derive from config/aliases.example.yaml)
 config/aliases.yaml
+
+# Dev stack: real env file + Home Assistant runtime state (keep only the config)
+.env.dev
+dev/homeassistant/*
+!dev/homeassistant/configuration.yaml
