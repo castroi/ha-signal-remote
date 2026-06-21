@@ -64,7 +64,6 @@ docker port home-control-bridge                                   # -> (empty)
 
 ## Shared-daemon note (design §6)
 
-The Pi runs **one** signal-cli for both this bot and the train-notifier bot.
 Anything that can reach the signal-cli container can send as the bot, so keep it off
-the LAN, and **harden the train-notifier container to this bot's standard** — it is
-now adjacent to house control.
+the LAN. If any other container shares the same signal-cli daemon, **harden it to this
+bot's standard** — it is now adjacent to house control.
