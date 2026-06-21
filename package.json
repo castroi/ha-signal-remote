@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Signal -> Home Assistant cover/light control bridge",
   "engines": {
-    "node": ">=20 <21"
+    "node": ">=20.19 <21"
   },
   "packageManager": "pnpm@9.15.9",
   "scripts": {
