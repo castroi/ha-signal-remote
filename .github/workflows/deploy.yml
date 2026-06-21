@@ -31,7 +31,7 @@ jobs:
 
       # arm64 build on an amd64 runner needs QEMU emulation.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
