@@ -75,6 +75,7 @@ const REPLY = {
   preempted: 'הפקודה בוטלה (פקודה חדשה)',
   menu: 'לא הבנתי. נסה: פתח/סגור/עצור + חדר, או "תריסים" לכל התריסים',
   unrecognizedControlReply: 'לא הבנתי. נסה: פתח/סגור/עצור + חדר, או "תריסים" לכל התריסים',
+  help: 'פקודות: פתח/סגור/עצור + חדר · הדלק/כבה גינה · "תריסים" + כן/לא לכל התריסים · "סטטוס" למצב',
   confirmCancelled: 'בוטל',
 };
 
@@ -203,6 +204,22 @@ export class Bridge {
       return;
     }
 
+    // Help/menu — like status, always answered for authorized senders (even in
+    // kill-switch safe mode); never a device action, so resolve before the gates.
+    if (parsed.kind === 'control-reply' && (parsed.word === 'עזרה' || parsed.word === 'תפריט')) {
+      await this.reply(env, REPLY.help);
+      this.audit?.log({
+        ts: this.now(),
+        sourceUuid: env.sourceUuid,
+        intent: 'help',
+        entity: undefined,
+        result: 'help',
+        latencyMs: undefined,
+        reasonCode: undefined,
+      });
+      return;
+    }
+
     // Item 1: כן/לא — confirm flow. Resolve before freshness/rate gates (confirm
     // lane is exempt from normal caps per §5) but still go through dedup above.
     if (parsed.kind === 'control-reply' && (parsed.word === 'כן' || parsed.word === 'לא')) {
@@ -295,7 +312,9 @@ export class Bridge {
         });
         return;
       case 'control-reply':
-        // A reserved word used outside its valid context (תפריט/עזרה used mid-flow).
+        // Defensive fallback: every current reserved word (סטטוס, עזרה, תפריט,
+        // כן, לא) is intercepted by a dedicated handler above, so this is reached
+        // only if a future reserved word is added without one.
         await this.reply(env, REPLY.unrecognizedControlReply);
         this.audit?.log({
           ts: this.now(),
