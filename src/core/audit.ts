@@ -22,6 +22,7 @@ export type AuditResult =
   | 'rejected'
   | 'confirm_prompt'
   | 'status'
+  | 'help'
   | 'reinitialized';
 
 export type AuditReasonCode =

@@ -36,15 +36,20 @@ export interface SignalAdapterOptions {
   readonly logDrop?: (uuidPresent: boolean) => void;
 }
 
+interface SignalEnvelope {
+  sourceUuid?: string;
+  sourceNumber?: string | null;
+  timestamp?: number;
+  dataMessage?: { timestamp?: number; message?: string };
+}
+
 interface RpcFrame {
   method?: string;
+  // bbernhard /v1/receive/{number} WS emits the envelope at the top level
+  // ({envelope, account}); the json-rpc notification form nests it under params.
+  envelope?: SignalEnvelope;
   params?: {
-    envelope?: {
-      sourceUuid?: string;
-      sourceNumber?: string | null;
-      timestamp?: number;
-      dataMessage?: { timestamp?: number; message?: string };
-    };
+    envelope?: SignalEnvelope;
   };
 }
 
@@ -73,9 +78,11 @@ export class SignalAdapter {
     } catch {
       return; // malformed frame
     }
-    if (frame.method !== 'receive') return;
-
-    const env = frame.params?.envelope;
+    // Two transports carry the same payload: the json-rpc notification form
+    // ({method:'receive', params:{envelope}}) and the bbernhard /v1/receive WS
+    // form ({envelope, account}, no method). Accept either.
+    const env = frame.method === 'receive' ? frame.params?.envelope : frame.envelope;
+    if (!env) return;
     const sourceUuid = env?.sourceUuid;
     const message = env?.dataMessage?.message;
     // Envelope timestamp (server-assigned) is the freshness anchor (§5).
@@ -101,14 +108,17 @@ export class SignalAdapter {
    * Send a reply via the signal-cli REST endpoint. Returns true on success,
    * false on any failure (swallowed; never throws).
    */
-  async send(_sourceUuid: string, recipient: string, message: string): Promise<boolean> {
+  async send(sourceUuid: string, recipient: string, message: string): Promise<boolean> {
+    // Signal envelopes often omit the sender's phone number; identity is the
+    // ACI (sourceUuid). Fall back to it so the reply has a valid recipient.
+    const to = recipient || sourceUuid;
     try {
       const res = await this.fetchImpl(`${this.apiUrl}/v2/send`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           number: this.botNumber,
-          recipients: [recipient],
+          recipients: [to],
           message,
         }),
       });

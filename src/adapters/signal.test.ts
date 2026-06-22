@@ -45,6 +45,22 @@ function notification(sourceUuid: string, ts: number, message: string): string {
   });
 }
 
+// The actual frame the bbernhard /v1/receive/{number} WebSocket emits in
+// MODE=json-rpc: the envelope is top-level ({envelope, account}), with no
+// jsonrpc/method/params wrapper.
+function receiveFrame(sourceUuid: string, ts: number, message: string): string {
+  return JSON.stringify({
+    envelope: {
+      source: sourceUuid,
+      sourceUuid,
+      sourceNumber: null,
+      timestamp: ts,
+      dataMessage: { timestamp: ts, message },
+    },
+    account: '+15550001111',
+  });
+}
+
 describe('SignalAdapter (design §2, §6 A01)', () => {
   it('extracts sourceUuid + envelope timestamp for an allowed sender', () => {
     const { socket, received } = makeAdapter();
@@ -77,6 +93,22 @@ describe('SignalAdapter (design §2, §6 A01)', () => {
     expect(received[0]!.sourceUuid).toBe('uuid-allowed');
   });
 
+  it('accepts the bbernhard /v1/receive WS frame ({envelope, account}, no method)', () => {
+    const { socket, received } = makeAdapter();
+    socket.emitMessage(receiveFrame('uuid-allowed', 1800, 'פתח סלון'));
+    expect(received).toHaveLength(1);
+    expect(received[0]!.sourceUuid).toBe('uuid-allowed');
+    expect(received[0]!.timestamp).toBe(1800);
+    expect(received[0]!.message).toBe('פתח סלון');
+  });
+
+  it('applies the allowlist to the top-level WS frame too', () => {
+    const sendSpy = vi.fn(async () => new Response('{}', { status: 201 })) as unknown as typeof fetch;
+    const { socket, received } = makeAdapter(sendSpy);
+    socket.emitMessage(receiveFrame('uuid-stranger', 1800, 'פתח סלון'));
+    expect(received).toHaveLength(0);
+  });
+
   it('ignores non-receive notifications and malformed frames', () => {
     const { socket, received } = makeAdapter();
     socket.emitMessage('not json');
@@ -96,6 +128,17 @@ describe('SignalAdapter (design §2, §6 A01)', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe('http://localhost:8080/v2/send');
     expect((calls[0]!.body as { message: string }).message).toBe('מבצע…');
+  });
+
+  it('falls back to sourceUuid as recipient when the phone number is empty', async () => {
+    const calls: { body: { recipients: string[] } }[] = [];
+    const sendImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push({ body: JSON.parse(init.body as string) });
+      return new Response('{}', { status: 201 });
+    }) as unknown as typeof fetch;
+    const { adapter } = makeAdapter(sendImpl);
+    await adapter.send('uuid-allowed', '', 'מבצע…');
+    expect(calls[0]!.body.recipients).toEqual(['uuid-allowed']);
   });
 
   it('a failed send is swallowed (logged + dropped), never throws', async () => {

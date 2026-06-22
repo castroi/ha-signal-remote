@@ -128,6 +128,41 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
     expect(h.sends.some((s) => s.message.startsWith('מצב:'))).toBe(true);
   });
 
+  it('answers עזרה/תפריט with the help menu (audited), even in kill-switch safe mode', async () => {
+    const auditEvents: AuditEvent[] = [];
+    const nowRef = { t: 1_000_000 };
+    const audit = new AuditLogger({
+      salt: 'test-salt',
+      sink: (line) => auditEvents.push(JSON.parse(line) as AuditEvent),
+    });
+    const sends: { message: string }[] = [];
+    const haCalls: unknown[] = [];
+    const bridge = new Bridge({
+      config: testConfig(),
+      now: () => nowRef.t,
+      emitNotice: () => {},
+      audit,
+      haRest: {
+        callCover: vi.fn(async () => { haCalls.push(1); return { ok: true } as const; }),
+        callLight: vi.fn(async () => { haCalls.push(1); return { ok: true } as const; }),
+      },
+      signal: { send: vi.fn(async (_u: string, _n: string, message: string) => { sends.push({ message }); return true; }) },
+      clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
+    });
+    bridge.engageKill();
+
+    await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message: 'עזרה' });
+    await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t + 1, message: 'תפריט' });
+
+    // Both reply with the help menu — and never the kill reply or an HA action.
+    expect(sends.filter((s) => s.message.startsWith('פקודות:'))).toHaveLength(2);
+    expect(sends.some((s) => s.message === 'המערכת בכיבוי חירום')).toBe(false);
+    expect(haCalls).toHaveLength(0);
+    // The audit.ts 'help' result is emitted, with no raw UUID in the line.
+    expect(auditEvents.filter((e) => e.result === 'help')).toHaveLength(2);
+    for (const ev of auditEvents) expect(JSON.stringify(ev)).not.toContain('u1');
+  });
+
   it('restart (startup) clears RAM state: a previously-seen dedup key is accepted again', async () => {
     const h = harness();
     h.bridge.onWsConnected();
