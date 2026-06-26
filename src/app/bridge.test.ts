@@ -162,8 +162,9 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
     await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message: 'עזרה' });
     await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t + 1, message: 'תפריט' });
 
-    // Both reply with the help menu — and never the kill reply or an HA action.
-    expect(sends.filter((s) => s.message.startsWith('פקודות:'))).toHaveLength(2);
+    // Both reply with the configured help menu — and never the kill reply or an HA action.
+    const expectedHelp = testConfig().aliases.helpText();
+    expect(sends.filter((s) => s.message === expectedHelp)).toHaveLength(2);
     expect(sends.some((s) => s.message === 'המערכת בכיבוי חירום')).toBe(false);
     expect(haCalls).toHaveLength(0);
     // The audit.ts 'help' result is emitted, with no raw UUID in the line.
