@@ -10,6 +10,9 @@ signal-cli-rest-api, REST + WebSocket to Home Assistant.
   bot's dedicated number, reachable on the private network.
 - Home Assistant reachable on localhost / the private network, with a long-lived
   access token.
+- If you use preset-position verbs (`open_to` / `close_to`), the HA scripts named in
+  `position_scripts` (e.g. `script.covers_up` / `script.covers_down`) must exist in Home
+  Assistant and accept an `entity_id` list plus a `position` variable.
 - Docker + Docker Compose v2.
 
 ## Configuration

@@ -2,8 +2,15 @@
 # Adding a device = one row here + HA config. No bridge code change (design §7).
 #
 # verbs: canonical action -> accepted normalized Hebrew variants (exact + prefix match only).
-# entities: canonical room/light name -> { type, entity_id, completion_timeout_ms, aliases }.
+# entities: canonical room/light name -> { type, entity_id, completion_timeout_ms, aliases, [open_position, close_position, tolerance_percent] }.
 # scopes: bare scope words -> the set of entities they expand to.
+# position_scripts: the HA scripts the bridge calls to drive covers to a preset position.
+#
+# Full vs preset is the user's choice of VERB:
+#   open/close      -> full open (100) / full close (0) via cover.open_cover/close_cover.
+#   open_to/close_to -> drive the cover to its configured open_position/close_position
+#                       via the position_scripts below (the household's covers_up/down scripts).
+# The open_to/close_to words below (העלה / הנמך) are placeholders — set the words you actually say.
 
 verbs:
   open: ["פתח", "תפתח", "להרים", "הרם"]
@@ -11,6 +18,8 @@ verbs:
   stop: ["עצור", "תעצור", "הפסק"]
   on: ["הדלק", "תדליק", "להדליק"]
   off: ["כבה", "תכבה", "לכבות"]
+  open_to: ["העלה"]
+  close_to: ["הנמך"]
 
 entities:
   salon:
@@ -18,11 +27,16 @@ entities:
     entity_id: cover.living_room
     completion_timeout_ms: 30000
     aliases: ["סלון"]
+    open_position: 80       # target for the open_to verb
+    close_position: 30      # target for the close_to verb
+    tolerance_percent: 5    # per-cover override of the default completion band
   kitchen:
     type: cover
     entity_id: cover.kitchen
     completion_timeout_ms: 30000
     aliases: ["מטבח"]
+    open_position: 90
+    close_position: 20
   kids_room:
     type: cover
     entity_id: cover.kids_room
@@ -43,3 +57,13 @@ scopes:
   all_covers:
     word: "תריסים"
     expands_to_type: cover
+
+# IMPORTANT: these scripts MUST themselves refuse to move a cover in the wrong
+# direction (e.g. a close-to-30 on a cover already at 20). For a single-cover
+# command the bridge also pre-checks live position and refuses a reversing move,
+# but for an all-covers (תריסים) preset the bridge delegates direction safety
+# entirely to the script — so the script's own guard is the only protection there.
+position_scripts:
+  open: script.covers_up
+  close: script.covers_down
+  default_tolerance_percent: 3
