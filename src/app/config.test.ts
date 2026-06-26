@@ -97,6 +97,66 @@ describe('alias table loading', () => {
   });
 });
 
+describe('help text (issue #21)', () => {
+  type Raw = ConstructorParameters<typeof AliasTable>[0];
+  const cover = (aliases: string[], entity_id: string) => ({
+    type: 'cover',
+    entity_id,
+    completion_timeout_ms: 30_000,
+    aliases,
+  });
+  const light = (aliases: string[], entity_id: string) => ({
+    type: 'light',
+    entity_id,
+    completion_timeout_ms: 5_000,
+    aliases,
+  });
+  const make = (entities: Record<string, unknown>, help?: string): AliasTable =>
+    new AliasTable({
+      verbs: { open: ['פתח'], close: ['סגור'] },
+      entities,
+      scopes: { all_covers: { word: 'תריסים', expands_to_type: 'cover' } },
+      ...(help !== undefined ? { messages: { help } } : {}),
+    } as unknown as Raw);
+
+  it('fills {rooms} and {lights} from the first alias of each entity, in config order', () => {
+    const table = make(
+      {
+        salon: cover(['סלון'], 'cover.living_room'),
+        kitchen: cover(['מטבח'], 'cover.kitchen'),
+        garden: light(['גינה'], 'light.garden'),
+      },
+      'חדרים: {rooms}\nאורות: {lights}',
+    );
+    expect(table.helpText()).toBe('חדרים: סלון · מטבח\nאורות: גינה');
+  });
+
+  it('uses only the first alias as the display name', () => {
+    const table = make(
+      { kids: cover(['חדר ילדים', 'ילדים'], 'cover.kids_room') },
+      'חדרים: {rooms}',
+    );
+    expect(table.helpText()).toBe('חדרים: חדר ילדים');
+  });
+
+  it('drops a line whose placeholder resolves to empty, keeping other lines', () => {
+    const table = make(
+      { salon: cover(['סלון'], 'cover.living_room') },
+      '🪟 תריסים\nחדרים: {rooms}\nאורות: {lights}\nℹ️ סטטוס',
+    );
+    expect(table.helpText()).toBe('🪟 תריסים\nחדרים: סלון\nℹ️ סטטוס');
+  });
+
+  it('falls back to the built-in default when messages.help is absent', () => {
+    const table = make({ salon: cover(['סלון'], 'cover.living_room') });
+    const text = table.helpText();
+    expect(text).toContain('מצב המערכת');
+    expect(text).toContain('חדרים: סלון');
+    expect(text).not.toContain('{rooms}');
+    expect(text).not.toContain('{lights}');
+  });
+});
+
 describe('alias table validation (issue #1 hardening)', () => {
   // These build deliberately-malformed alias tables to assert load-time rejection,
   // so the raw shape is cast to the constructor's parameter type.

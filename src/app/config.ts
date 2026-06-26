@@ -73,6 +73,24 @@ export interface EntityDef {
 /** Default completion tolerance band (%) when neither per-cover nor script-level override is set. */
 export const DEFAULT_TOLERANCE_PERCENT = 3;
 
+/**
+ * Fallback help/menu text when the alias table has no `messages.help`. `{rooms}`
+ * and `{lights}` are filled at render time from the configured entities so the
+ * device list never drifts; a line whose placeholder resolves to empty is dropped.
+ */
+export const DEFAULT_HELP_TEMPLATE = [
+  '🪟 תריסים — "פתח" / "סגור" / "עצור" + חדר',
+  'חדרים: {rooms}',
+  '',
+  '📐 מצב שמור — "העלה" / "הנמך" + חדר',
+  '',
+  '💡 אורות — "הדלק" / "כבה" + שם',
+  'אורות: {lights}',
+  '',
+  '🏠 כל התריסים — שלח "תריסים", ואז כן / לא',
+  'ℹ️ מצב המערכת — שלח "סטטוס"',
+].join('\n');
+
 /** HA entity-id shape: `domain.object_id` (lowercase letters/underscore . lowercase alphanumeric/underscore). */
 const ENTITY_ID_RE = /^[a-z_]+\.[a-z0-9_]+$/;
 
@@ -99,6 +117,7 @@ interface RawAliasFile {
   >;
   scopes: { all_covers: { word: string; expands_to_type: EntityType } };
   position_scripts?: { open: string; close: string; default_tolerance_percent?: number };
+  messages?: { help?: string };
 }
 
 export class AliasTable {
@@ -107,6 +126,7 @@ export class AliasTable {
   readonly positionScripts: PositionScripts | undefined;
   private readonly aliasIndex: ReadonlyMap<string, EntityDef>;
   private readonly verbIndex: ReadonlyMap<string, Verb>;
+  private readonly helpTemplate: string;
 
   constructor(raw: RawAliasFile) {
     const entities = new Map<string, EntityDef>();
@@ -181,6 +201,37 @@ export class AliasTable {
     this.aliasIndex = aliasIndex;
     this.verbIndex = verbIndex;
     this.allCoversWord = normalize(raw.scopes.all_covers.word);
+    this.helpTemplate = raw.messages?.help ?? DEFAULT_HELP_TEMPLATE;
+  }
+
+  /**
+   * Renders the configured help/menu text (item: configurable help, issue #21).
+   * Fills `{rooms}` / `{lights}` with the display names (first alias) of the
+   * configured cover / light entities in config order, and drops any line whose
+   * placeholder resolves to empty so there is no dangling label or blank gap.
+   */
+  helpText(): string {
+    const rooms = this.displayNames('cover').join(' · ');
+    const lights = this.displayNames('light').join(' · ');
+    return this.helpTemplate
+      .split('\n')
+      .filter(
+        (line) =>
+          !(line.includes('{rooms}') && rooms === '') &&
+          !(line.includes('{lights}') && lights === ''),
+      )
+      .map((line) => line.split('{rooms}').join(rooms).split('{lights}').join(lights))
+      .join('\n');
+  }
+
+  /** First (canonical) alias of each entity of a given type, in config order. */
+  private displayNames(type: EntityType): string[] {
+    const names: string[] = [];
+    for (const entity of this.entities.values()) {
+      const [first] = entity.aliases;
+      if (entity.type === type && first) names.push(first);
+    }
+    return names;
   }
 
   resolveEntity(alias: string): EntityDef | undefined {
