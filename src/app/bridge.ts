@@ -86,7 +86,6 @@ const REPLY = {
   preempted: 'הפקודה בוטלה (פקודה חדשה)',
   menu: 'לא הבנתי. נסה: פתח/סגור/עצור + חדר, או "תריסים" לכל התריסים',
   unrecognizedControlReply: 'לא הבנתי. נסה: פתח/סגור/עצור + חדר, או "תריסים" לכל התריסים',
-  help: 'פקודות: פתח/סגור/עצור + חדר · הדלק/כבה גינה · "תריסים" + כן/לא לכל התריסים · "סטטוס" למצב',
   confirmCancelled: 'בוטל',
 };
 
@@ -218,7 +217,7 @@ export class Bridge {
     // Help/menu — like status, always answered for authorized senders (even in
     // kill-switch safe mode); never a device action, so resolve before the gates.
     if (parsed.kind === 'control-reply' && (parsed.word === 'עזרה' || parsed.word === 'תפריט')) {
-      await this.reply(env, REPLY.help);
+      await this.reply(env, this.cfg.aliases.helpText());
       this.audit?.log({
         ts: this.now(),
         sourceUuid: env.sourceUuid,
