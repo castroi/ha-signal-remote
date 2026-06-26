@@ -131,6 +131,13 @@ that would reverse direction** (e.g. a `close_to 30` on a cover already at 20) �
 "already there" rather than moving the wrong way. A preset verb on a cover with no configured
 target for that direction falls back to full open/close.
 
+**Help text (`messages.help`).** The `עזרה` / `תפריט` reply is configurable in the same file
+under an optional `messages.help` block — edit it freely with no code change. The `{rooms}`
+and `{lights}` placeholders are filled at send time from the first alias of each configured
+cover / light entity, so the listed devices never drift from the table; a line whose
+placeholder resolves to empty (e.g. a deployment with no lights) is dropped. If `messages.help`
+is absent, a built-in default is used.
+
 ---
 
 ## Usage (Hebrew commands)

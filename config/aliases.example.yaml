@@ -67,3 +67,26 @@ position_scripts:
   open: script.covers_up
   close: script.covers_down
   default_tolerance_percent: 3
+
+# User-facing reply text. Edit freely — no code change needed.
+# In `help`, {rooms} and {lights} are auto-filled from the entities above
+# (the first alias of each), so the device list never drifts when you add a
+# device. A line whose placeholder resolves to empty is dropped (e.g. no lights).
+messages:
+  help: |
+    🪟 תריסים
+    "סגור סלון" · "פתח מטבח" · "עצור סלון"
+    חדרים: {rooms}
+
+    📐 מצב שמור
+    "העלה סלון" / "הנמך סלון"
+
+    💡 אורות
+    "הדלק גינה" / "כבה גינה"
+    אורות: {lights}
+
+    🏠 כל התריסים
+    שלח "תריסים", ואז כן / לא
+
+    ℹ️ מצב המערכת
+    שלח "סטטוס"
