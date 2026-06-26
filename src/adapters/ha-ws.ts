@@ -81,6 +81,8 @@ export interface HaWsSocket {
 export interface StateChange {
   readonly entityId: string;
   readonly state: string;
+  /** `attributes.current_position` (0–100) for covers that report it; undefined otherwise. */
+  readonly position?: number | undefined;
 }
 
 export interface HaWsClientOptions {
@@ -95,7 +97,10 @@ interface HaWsFrame {
   type?: string;
   event?: {
     event_type?: string;
-    data?: { entity_id?: string; new_state?: { state?: string } };
+    data?: {
+      entity_id?: string;
+      new_state?: { state?: string; attributes?: { current_position?: number } };
+    };
   };
 }
 
@@ -146,7 +151,8 @@ export class HaWsClient {
         const entityId = frame.event.data?.entity_id;
         const state = frame.event.data?.new_state?.state;
         if (entityId === undefined || state === undefined) return;
-        this.onStateChanged({ entityId, state });
+        const position = frame.event.data?.new_state?.attributes?.current_position;
+        this.onStateChanged({ entityId, state, position });
         return;
       }
       default:

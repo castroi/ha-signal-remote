@@ -130,6 +130,96 @@ describe('CommandStateMachine (design §5)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Per-cover target positions (issue #1): position-aware completion
+// ---------------------------------------------------------------------------
+
+const COVER_TO_30 = {
+  ...COVER,
+  target: { position: 30, tolerancePercent: 3 },
+};
+
+describe('CommandStateMachine — preset position completion (issue #1)', () => {
+  it('a preset cover command issues issue-cover-position and acks when observed within tolerance', () => {
+    const sm = machine();
+    const start = sm.submit({ commandId: 'p1', sourceUuid: 'u1', verb: 'close', entity: COVER_TO_30 });
+    expect(effectKinds(start)).toEqual(
+      expect.arrayContaining(['issue-cover-position', 'reply-progress']),
+    );
+    const issue = start.find((e) => e.kind === 'issue-cover-position');
+    expect(issue).toMatchObject({
+      entityId: COVER.entityId,
+      scriptDirection: 'close',
+      position: 30,
+    });
+    // 31 is within ±3 of 30 → success
+    const done = sm.observeState(COVER.entityId, 'open', 31);
+    expect(sm.stateOf('p1')).toBe('observed_target');
+    expect(effectKinds(done)).toContain('reply-success');
+  });
+
+  it('a preset move outside tolerance never acks and eventually times out', () => {
+    const now = { t: 0 };
+    const sm = machine(now);
+    sm.submit({
+      commandId: 'p2',
+      sourceUuid: 'u1',
+      verb: 'open',
+      entity: { ...COVER, target: { position: 80, tolerancePercent: 3 } },
+    });
+    const mid = sm.observeState(COVER.entityId, 'open', 60); // 20 off target
+    expect(effectKinds(mid)).not.toContain('reply-success');
+    expect(sm.stateOf('p2')).toBe('issued');
+    now.t = COVER.completionTimeoutMs + 1;
+    const fired = sm.tick();
+    expect(sm.stateOf('p2')).toBe('timeout');
+    expect(effectKinds(fired)).toContain('reply-timeout');
+  });
+
+  it('the tolerance band is inclusive at both edges', () => {
+    const high = machine();
+    high.submit({ commandId: 'p3a', sourceUuid: 'u1', verb: 'close', entity: COVER_TO_30 });
+    high.observeState(COVER.entityId, 'open', 33); // +3, the upper edge
+    expect(high.stateOf('p3a')).toBe('observed_target');
+
+    const low = machine();
+    low.submit({ commandId: 'p3b', sourceUuid: 'u1', verb: 'close', entity: COVER_TO_30 });
+    low.observeState(COVER.entityId, 'open', 27); // -3, the lower edge
+    expect(low.stateOf('p3b')).toBe('observed_target');
+  });
+
+  it('a position just outside the band does not complete', () => {
+    const sm = machine();
+    sm.submit({ commandId: 'p3c', sourceUuid: 'u1', verb: 'close', entity: COVER_TO_30 });
+    const out = sm.observeState(COVER.entityId, 'open', 34); // 4 away, just outside ±3
+    expect(effectKinds(out)).not.toContain('reply-success');
+    expect(sm.stateOf('p3c')).toBe('issued');
+  });
+
+  it('a missing observed position cannot complete a preset command', () => {
+    const sm = machine();
+    sm.submit({ commandId: 'p4', sourceUuid: 'u1', verb: 'close', entity: COVER_TO_30 });
+    const none = sm.observeState(COVER.entityId, 'open'); // no position attribute
+    expect(effectKinds(none)).not.toContain('reply-success');
+    expect(sm.stateOf('p4')).toBe('issued');
+  });
+
+  it('each cover in a preset all-covers command is judged against its own target', () => {
+    const sm = machine();
+    const c1 = { ...COVER, target: { position: 30, tolerancePercent: 3 } };
+    const c2 = { ...COVER2, target: { position: 20, tolerancePercent: 3 } };
+    sm.submitAllCovers({ commandId: 'p5', sourceUuid: 'u1', verb: 'close', entities: [c1, c2] });
+    sm.confirm('p5', 'u1');
+    // c1 observed at 20 — that's c2's target, not c1's (30) → no completion
+    const mid = sm.observeState(c1.entityId, 'open', 20);
+    expect(effectKinds(mid)).not.toContain('reply-success');
+    expect(sm.stateOf('p5')).toBe('issued');
+    // c1 observed at its own target → success
+    const done = sm.observeState(c1.entityId, 'open', 30);
+    expect(effectKinds(done)).toContain('reply-success');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fix item 4 (MED): markEntityIssueFailed — per-entity failure for all-covers
 // ---------------------------------------------------------------------------
 

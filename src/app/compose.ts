@@ -268,7 +268,7 @@ export function composeAndStart(opts: ComposeOptions): RuntimeHandle {
       socket,
       token: cfg.secrets.haToken,
       onStateChanged: (change) => {
-        bridge.onStateChanged(change.entityId, change.state).catch((err: unknown) => {
+        bridge.onStateChanged(change.entityId, change.state, change.position).catch((err: unknown) => {
           console.error('[bridge] onStateChanged error:', err);
         });
       },

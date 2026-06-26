@@ -1,5 +1,5 @@
-import type { Config } from './config.js';
-import type { EntityDef } from './config.js';
+import type { Config, EntityDef, Verb } from './config.js';
+import { DEFAULT_TOLERANCE_PERCENT } from './config.js';
 import { normalize } from '../core/normalize.js';
 import { DedupCache } from '../core/dedup.js';
 import { checkFreshness } from '../core/freshness.js';
@@ -12,6 +12,7 @@ import {
   type EntityRef,
   type CoverVerb,
   type LightVerb,
+  type PositionTarget,
 } from '../core/state-machine.js';
 import { WsHealthGate } from '../adapters/ha-ws.js';
 import { KillSwitch } from '../core/kill-switch.js';
@@ -36,6 +37,14 @@ import type { IncomingEnvelope } from '../adapters/signal.js';
 export interface HaRestPort {
   callCover(entityId: string, verb: CoverVerb): Promise<HaCallResult>;
   callLight(entityId: string, verb: LightVerb): Promise<HaCallResult>;
+  /** Read a cover's live current_position (0–100); undefined when unreadable/unreported. */
+  getCoverPosition(entityId: string): Promise<number | undefined>;
+  /** Drive covers to a preset position via the household HA script. */
+  callPositionScript(
+    scriptEntityId: string,
+    entityIds: readonly string[],
+    position: number,
+  ): Promise<HaCallResult>;
 }
 
 export interface SignalSendPort {
@@ -71,6 +80,8 @@ const REPLY = {
   killed: 'המערכת בכיבוי חירום',
   progress: 'מבצע…',
   success: 'בוצע',
+  alreadyThere: 'התריס כבר במצב המבוקש',
+  positionUnknown: 'לא ניתן לקרוא את מצב התריס',
   failed: 'הפעולה נכשלה',
   preempted: 'הפקודה בוטלה (פקודה חדשה)',
   menu: 'לא הבנתי. נסה: פתח/סגור/עצור + חדר, או "תריסים" לכל התריסים',
@@ -487,7 +498,7 @@ export class Bridge {
 
   private async dispatchCommand(
     env: IncomingEnvelope,
-    verb: CoverVerb | LightVerb,
+    verb: Verb,
     scope: { type: 'entity'; entityId: string } | { type: 'all-covers' },
   ): Promise<void> {
     if (scope.type === 'entity') {
@@ -510,20 +521,61 @@ export class Bridge {
         });
         return;
       }
+
+      const effectiveVerb = baseVerb(verb);
+      // A preset (open_to/close_to) verb with a configured target drives the cover
+      // through the household script; an unset target falls through to full open/close.
+      const target = this.targetFor(entity, verb);
+      if (target) {
+        // Read the live position and refuse a move that would reverse direction
+        // (issue #1 reversal guard) — the household script guards too, but the
+        // bridge pre-check lets a no-op reply distinctly instead of timing out.
+        const current = await this.haRest.getCoverPosition(entity.entityId);
+        if (current === undefined) {
+          await this.reply(env, REPLY.positionUnknown);
+          this.audit?.log({
+            ts: this.now(),
+            sourceUuid: env.sourceUuid,
+            intent: `${effectiveVerb} ${entity.entityId}`,
+            entity: entity.entityId,
+            result: 'rejected',
+            latencyMs: undefined,
+            reasonCode: 'position-unknown',
+          });
+          return;
+        }
+        // A target is only produced for the open_to/close_to verbs, so the
+        // direction here is unambiguous.
+        const direction = verb === 'open_to' ? 'open' : 'close';
+        if (!shouldMove(direction, current, target)) {
+          await this.reply(env, REPLY.alreadyThere);
+          this.audit?.log({
+            ts: this.now(),
+            sourceUuid: env.sourceUuid,
+            intent: `${effectiveVerb} ${entity.entityId}`,
+            entity: entity.entityId,
+            result: 'rejected',
+            latencyMs: undefined,
+            reasonCode: 'noop-already-there',
+          });
+          return;
+        }
+      }
+
       const commandId = this.genCommandId();
       this.replyTo.set(commandId, { uuid: env.sourceUuid, number: env.sourceNumber ?? '' });
-      const ref = toRef(entity);
+      const ref = toRef(entity, target);
       const effects = this.stateMachine.submit({
         commandId,
         sourceUuid: env.sourceUuid,
-        verb,
+        verb: effectiveVerb,
         entity: ref,
       });
       await this.runEffects(effects);
       this.audit?.log({
         ts: this.now(),
         sourceUuid: env.sourceUuid,
-        intent: `${verb} ${entity.entityId}`,
+        intent: `${effectiveVerb} ${entity.entityId}`,
         entity: entity.entityId,
         result: 'issued',
         latencyMs: undefined,
@@ -556,14 +608,17 @@ export class Bridge {
 
       const commandId = this.genCommandId();
       this.replyTo.set(commandId, { uuid: env.sourceUuid, number: env.sourceNumber ?? '' });
+      // Each cover carries its own preset target (open_to/close_to); covers with no
+      // configured target for this direction fall back to full open/close. The HA
+      // script guards direction per cover, so the batch needs no live-position read.
       const entities = this.cfg.aliases.coverEntityIds().map((id) => {
         const e = this.cfg.aliases.entities.get(id)!;
-        return toRef(e);
+        return toRef(e, this.targetFor(e, verb));
       });
       const effects = this.stateMachine.submitAllCovers({
         commandId,
         sourceUuid: env.sourceUuid,
-        verb: verb as CoverVerb,
+        verb: baseVerb(verb) as CoverVerb,
         entities,
       });
       // Register the pending confirm so handleConfirmReply can resolve it (item 1).
@@ -583,8 +638,8 @@ export class Bridge {
   }
 
   /** Forward an observed HA state into the state machine; reply on resolution. */
-  async onStateChanged(entityId: string, state: string): Promise<void> {
-    const effects = this.stateMachine.observeState(entityId, state);
+  async onStateChanged(entityId: string, state: string, position?: number): Promise<void> {
+    const effects = this.stateMachine.observeState(entityId, state, position);
     await this.runEffects(effects);
   }
 
@@ -603,6 +658,22 @@ export class Bridge {
           if (!r.ok) {
             // Fix item 4: use per-entity failure so one failed cover does not
             // drop tracking of the other covers in an all-covers command.
+            const failEffects = this.stateMachine.markEntityIssueFailed(e.commandId, e.entityId);
+            await this.runEffects(failEffects);
+          }
+          break;
+        }
+        case 'issue-cover-position': {
+          const script =
+            e.scriptDirection === 'open'
+              ? this.cfg.aliases.positionScripts?.open
+              : this.cfg.aliases.positionScripts?.close;
+          // positionScripts is guaranteed present whenever a preset target exists
+          // (validated at config load), so an issued position effect always has a script.
+          const r = script
+            ? await this.haRest.callPositionScript(script, [e.entityId], e.position)
+            : ({ ok: false, reason: 'failed' } as const);
+          if (!r.ok) {
             const failEffects = this.stateMachine.markEntityIssueFailed(e.commandId, e.entityId);
             await this.runEffects(failEffects);
           }
@@ -723,6 +794,27 @@ export class Bridge {
     });
   }
 
+  /**
+   * Resolve the preset target for a cover under a verb. Returns undefined for
+   * lights, non-preset verbs, or a cover with no configured position for that
+   * direction (so the command falls through to full open/close).
+   */
+  private targetFor(entity: EntityDef, verb: Verb): PositionTarget | undefined {
+    if (entity.type !== 'cover') return undefined;
+    const position =
+      verb === 'open_to'
+        ? entity.openPosition
+        : verb === 'close_to'
+          ? entity.closePosition
+          : undefined;
+    if (position === undefined) return undefined;
+    const tolerancePercent =
+      entity.tolerancePercent ??
+      this.cfg.aliases.positionScripts?.defaultTolerancePercent ??
+      DEFAULT_TOLERANCE_PERCENT;
+    return { position, tolerancePercent };
+  }
+
   private coverRefusalMessage(): string {
     if (!this.wsGate.coversEnabled()) return REPLY.coversDisabledWs;
     return REPLY.coversDisabledClock;
@@ -755,10 +847,29 @@ export class Bridge {
   }
 }
 
-function toRef(entity: EntityDef): EntityRef {
-  return {
+function toRef(entity: EntityDef, target?: PositionTarget): EntityRef {
+  const base = {
     entityId: entity.entityId,
     type: entity.type,
     completionTimeoutMs: entity.completionTimeoutMs,
   };
+  return target ? { ...base, target } : base;
+}
+
+/** Map a (possibly preset) verb to its base actuation direction. */
+function baseVerb(verb: Verb): CoverVerb | LightVerb {
+  if (verb === 'open_to') return 'open';
+  if (verb === 'close_to') return 'close';
+  return verb;
+}
+
+/**
+ * Reversal guard (issue #1): a preset move fires only when the target is more than
+ * tolerance away in the requested direction. `open` raises the position toward the
+ * target; `close` lowers it. Already-there or wrong-direction is a no-op.
+ */
+function shouldMove(direction: 'open' | 'close', current: number, target: PositionTarget): boolean {
+  return direction === 'open'
+    ? target.position - current > target.tolerancePercent
+    : current - target.position > target.tolerancePercent;
 }

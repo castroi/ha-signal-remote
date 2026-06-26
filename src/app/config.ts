@@ -54,7 +54,7 @@ export const RESERVED_WORDS: ReadonlySet<string> = new Set([
 ]);
 
 export type EntityType = 'cover' | 'light';
-export type Verb = 'open' | 'close' | 'stop' | 'on' | 'off';
+export type Verb = 'open' | 'close' | 'stop' | 'on' | 'off' | 'open_to' | 'close_to';
 
 export interface EntityDef {
   readonly canonical: string;
@@ -62,20 +62,49 @@ export interface EntityDef {
   readonly entityId: string;
   readonly completionTimeoutMs: number;
   readonly aliases: readonly string[];
+  /** Target position (0–100) for the open_to verb; undefined = no preset (full-only). */
+  readonly openPosition?: number | undefined;
+  /** Target position (0–100) for the close_to verb; undefined = no preset (full-only). */
+  readonly closePosition?: number | undefined;
+  /** Completion tolerance band (%); resolved from per-cover override or the script default. */
+  readonly tolerancePercent?: number | undefined;
+}
+
+/** Default completion tolerance band (%) when neither per-cover nor script-level override is set. */
+export const DEFAULT_TOLERANCE_PERCENT = 3;
+
+/** HA entity-id shape: `domain.object_id` (lowercase letters/underscore . lowercase alphanumeric/underscore). */
+const ENTITY_ID_RE = /^[a-z_]+\.[a-z0-9_]+$/;
+
+/** The HA scripts the bridge calls to drive covers to a preset position (design issue #1). */
+export interface PositionScripts {
+  readonly open: string;
+  readonly close: string;
+  readonly defaultTolerancePercent: number;
 }
 
 interface RawAliasFile {
   verbs: Record<string, string[]>;
   entities: Record<
     string,
-    { type: EntityType; entity_id: string; completion_timeout_ms: number; aliases: string[] }
+    {
+      type: EntityType;
+      entity_id: string;
+      completion_timeout_ms: number;
+      aliases: string[];
+      open_position?: number;
+      close_position?: number;
+      tolerance_percent?: number;
+    }
   >;
   scopes: { all_covers: { word: string; expands_to_type: EntityType } };
+  position_scripts?: { open: string; close: string; default_tolerance_percent?: number };
 }
 
 export class AliasTable {
   readonly allCoversWord: string;
   readonly entities: ReadonlyMap<string, EntityDef>;
+  readonly positionScripts: PositionScripts | undefined;
   private readonly aliasIndex: ReadonlyMap<string, EntityDef>;
   private readonly verbIndex: ReadonlyMap<string, Verb>;
 
@@ -83,13 +112,44 @@ export class AliasTable {
     const entities = new Map<string, EntityDef>();
     const aliasIndex = new Map<string, EntityDef>();
 
+    if (raw.position_scripts) {
+      assertValidEntityId(raw.position_scripts.open, 'position_scripts.open');
+      assertValidEntityId(raw.position_scripts.close, 'position_scripts.close');
+      assertValidPercent(
+        raw.position_scripts.default_tolerance_percent,
+        'position_scripts',
+        'default_tolerance_percent',
+      );
+    }
+    const defaultTolerance =
+      raw.position_scripts?.default_tolerance_percent ?? DEFAULT_TOLERANCE_PERCENT;
+    this.positionScripts = raw.position_scripts
+      ? {
+          open: raw.position_scripts.open,
+          close: raw.position_scripts.close,
+          defaultTolerancePercent: defaultTolerance,
+        }
+      : undefined;
+
+    let anyPreset = false;
     for (const [canonical, def] of Object.entries(raw.entities)) {
+      assertValidEntityId(def.entity_id, `${canonical}.entity_id`);
+      assertValidPosition(def.open_position, canonical, 'open_position');
+      assertValidPosition(def.close_position, canonical, 'close_position');
+      assertValidPercent(def.tolerance_percent, canonical, 'tolerance_percent');
+      const hasPreset = def.open_position !== undefined || def.close_position !== undefined;
+      anyPreset = anyPreset || hasPreset;
       const entity: EntityDef = {
         canonical,
         type: def.type,
         entityId: def.entity_id,
         completionTimeoutMs: def.completion_timeout_ms,
         aliases: def.aliases,
+        openPosition: def.open_position,
+        closePosition: def.close_position,
+        // Resolve the completion band: per-cover override, else the script default.
+        // Only meaningful for covers that have a preset target.
+        tolerancePercent: hasPreset ? (def.tolerance_percent ?? defaultTolerance) : undefined,
       };
       entities.set(entity.entityId, entity);
       for (const alias of def.aliases) {
@@ -101,6 +161,13 @@ export class AliasTable {
         // Index by normalized form so lookups against normalized input match.
         aliasIndex.set(normalize(alias), entity);
       }
+    }
+
+    // Fail-fast: a preset position is unusable without the scripts that actuate it.
+    if (anyPreset && this.positionScripts === undefined) {
+      throw new Error(
+        'Alias table invalid: an entity defines open_position/close_position but no position_scripts block is configured',
+      );
     }
 
     const verbIndex = new Map<string, Verb>();
@@ -153,6 +220,29 @@ export class AliasTable {
       }
     }
     return result;
+  }
+}
+
+function assertValidPosition(value: number | undefined, canonical: string, field: string): void {
+  if (value === undefined) return;
+  if (!Number.isInteger(value) || value < 0 || value > 100) {
+    throw new Error(
+      `Alias table invalid: ${canonical}.${field} must be an integer 0–100, got ${value}`,
+    );
+  }
+}
+
+/** Same 0–100 integer constraint as a position, used for tolerance bands. */
+function assertValidPercent(value: number | undefined, canonical: string, field: string): void {
+  assertValidPosition(value, canonical, field);
+}
+
+/** Reject a malformed HA entity id before it reaches a request URL or body. */
+function assertValidEntityId(value: string, field: string): void {
+  if (!ENTITY_ID_RE.test(value)) {
+    throw new Error(
+      `Alias table invalid: ${field} "${value}" is not a valid HA entity id (domain.object_id)`,
+    );
   }
 }
 

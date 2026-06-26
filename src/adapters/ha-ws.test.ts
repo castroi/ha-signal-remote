@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { WsHealthGate, HaWsClient, type HaWsSocket, computeBackoff } from './ha-ws.js';
+import {
+  WsHealthGate,
+  HaWsClient,
+  type HaWsSocket,
+  type StateChange,
+  computeBackoff,
+} from './ha-ws.js';
 
 describe('WsHealthGate (design §5, go-live gates 2 & 3)', () => {
   it('covers disabled while WS is down (fail-closed)', () => {
@@ -105,7 +111,7 @@ describe('HaWsClient', () => {
 
   it('forwards state_changed events as entity + new state', () => {
     const ws = new FakeWs();
-    const seen: { entityId: string; state: string }[] = [];
+    const seen: StateChange[] = [];
     const client = new HaWsClient({ socket: ws, token: 'tok', onStateChanged: (e) => seen.push(e) });
     client.start();
     ws.emitMessage(JSON.stringify({ type: 'auth_required' }));
@@ -120,6 +126,47 @@ describe('HaWsClient', () => {
       }),
     );
     expect(seen).toEqual([{ entityId: 'cover.living_room', state: 'closed' }]);
+  });
+
+  it('surfaces attributes.current_position when present', () => {
+    const ws = new FakeWs();
+    const seen: StateChange[] = [];
+    const client = new HaWsClient({ socket: ws, token: 'tok', onStateChanged: (e) => seen.push(e) });
+    client.start();
+    ws.emitMessage(JSON.stringify({ type: 'auth_required' }));
+    ws.emitMessage(JSON.stringify({ type: 'auth_ok' }));
+    ws.emitMessage(
+      JSON.stringify({
+        type: 'event',
+        event: {
+          event_type: 'state_changed',
+          data: {
+            entity_id: 'cover.living_room',
+            new_state: { state: 'open', attributes: { current_position: 42 } },
+          },
+        },
+      }),
+    );
+    expect(seen).toEqual([{ entityId: 'cover.living_room', state: 'open', position: 42 }]);
+  });
+
+  it('leaves position undefined when the cover reports no current_position', () => {
+    const ws = new FakeWs();
+    const seen: StateChange[] = [];
+    const client = new HaWsClient({ socket: ws, token: 'tok', onStateChanged: (e) => seen.push(e) });
+    client.start();
+    ws.emitMessage(JSON.stringify({ type: 'auth_required' }));
+    ws.emitMessage(JSON.stringify({ type: 'auth_ok' }));
+    ws.emitMessage(
+      JSON.stringify({
+        type: 'event',
+        event: {
+          event_type: 'state_changed',
+          data: { entity_id: 'light.garden', new_state: { state: 'on' } },
+        },
+      }),
+    );
+    expect(seen[0]!.position).toBeUndefined();
   });
 
   it('marks the health gate connected on auth_ok and disconnected on close', () => {

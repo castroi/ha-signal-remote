@@ -24,10 +24,28 @@ export type CoverVerb = 'open' | 'close' | 'stop';
 export type LightVerb = 'on' | 'off';
 export type Verb = CoverVerb | LightVerb;
 
+/** A preset move is complete when the observed position is within ±tolerance of the target. */
+function reachesPosition(target: PositionTarget, observedPosition?: number): boolean {
+  if (observedPosition === undefined) return false;
+  return Math.abs(observedPosition - target.position) <= target.tolerancePercent;
+}
+
+/** A preset target position (issue #1): drive the cover to `position`, ack within ±tolerance. */
+export interface PositionTarget {
+  readonly position: number;
+  readonly tolerancePercent: number;
+}
+
 export interface EntityRef {
   readonly entityId: string;
   readonly type: 'cover' | 'light';
   readonly completionTimeoutMs: number;
+  /**
+   * When set, this is a preset-position command: actuation goes through the
+   * household script (`issue-cover-position`) and completion is judged by
+   * observed `current_position` within tolerance rather than the state string.
+   */
+  readonly target?: PositionTarget | undefined;
 }
 
 export type CommandState =
@@ -40,6 +58,13 @@ export type CommandState =
 
 export type Effect =
   | { kind: 'issue-cover'; commandId: string; entityId: string; verb: CoverVerb }
+  | {
+      kind: 'issue-cover-position';
+      commandId: string;
+      entityId: string;
+      scriptDirection: 'open' | 'close';
+      position: number;
+    }
   | { kind: 'issue-cover-stop'; commandId: string; entityId: string }
   | { kind: 'issue-light'; commandId: string; entityId: string; verb: LightVerb }
   | { kind: 'reply-progress'; commandId: string; entityId: string }
@@ -169,12 +194,25 @@ export class CommandStateMachine {
       if (entity.type === 'cover') {
         // Preempt any other command already issued on this entity.
         this.preemptHolder(entity.entityId, rec.commandId, effects);
-        effects.push({
-          kind: 'issue-cover',
-          commandId: rec.commandId,
-          entityId: entity.entityId,
-          verb: rec.verb as CoverVerb,
-        });
+        if (entity.target) {
+          // Preset-position command: actuate via the household script. The verb is
+          // already base-mapped to open/close by the bridge before submit, so a
+          // preset entity is only ever issued under 'open' or 'close'.
+          effects.push({
+            kind: 'issue-cover-position',
+            commandId: rec.commandId,
+            entityId: entity.entityId,
+            scriptDirection: rec.verb as 'open' | 'close',
+            position: entity.target.position,
+          });
+        } else {
+          effects.push({
+            kind: 'issue-cover',
+            commandId: rec.commandId,
+            entityId: entity.entityId,
+            verb: rec.verb as CoverVerb,
+          });
+        }
         effects.push({ kind: 'reply-progress', commandId: rec.commandId, entityId: entity.entityId });
         // Per-entity deadline (item 8): store in the map so all-covers commands track
         // each cover independently.
@@ -207,8 +245,12 @@ export class CommandStateMachine {
     }
   }
 
-  /** HA state observed for an entity; resolves the single issued command on it. */
-  observeState(entityId: string, observedState: string): Effect[] {
+  /**
+   * HA state observed for an entity; resolves the single issued command on it.
+   * `observedPosition` carries `attributes.current_position` (when reported) so
+   * preset-position commands can be judged against their per-entity target.
+   */
+  observeState(entityId: string, observedState: string, observedPosition?: number): Effect[] {
     const effects: Effect[] = [];
     // Find the single most-recent issued command tracking this entity and resolve it.
     // Using the first match is correct because preemption transitions older commands
@@ -216,8 +258,12 @@ export class CommandStateMachine {
     // should be in 'issued' at any time.
     for (const rec of this.commands.values()) {
       if (rec.state !== 'issued') continue;
-      if (!rec.entities.some((e) => e.entityId === entityId)) continue;
-      if (this.reachesTarget(rec.verb, observedState)) {
+      const ref = rec.entities.find((e) => e.entityId === entityId);
+      if (!ref) continue;
+      const reached = ref.target
+        ? reachesPosition(ref.target, observedPosition)
+        : this.reachesTarget(rec.verb, observedState);
+      if (reached) {
         rec.state = 'observed_target';
         rec.completionDeadlines.clear();
         effects.push({ kind: 'reply-success', commandId: rec.commandId });

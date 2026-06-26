@@ -54,12 +54,52 @@ export class HaRestClient {
     return this.callService('light', LIGHT_SERVICE[verb], entityId);
   }
 
-  private async callService(
-    domain: string,
-    service: string,
-    entityId: string,
+  /**
+   * Read a cover's live `attributes.current_position` (0–100) via the state endpoint.
+   * Returns undefined on any non-2xx, transport error, or a cover that does not report
+   * a position — callers must fail-closed (refuse) rather than guess in that case.
+   */
+  async getCoverPosition(entityId: string): Promise<number | undefined> {
+    const url = `${this.baseUrl}/api/states/${encodeURIComponent(entityId)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await this.fetchImpl(url, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${this.token}` },
+        signal: controller.signal,
+      });
+      if (!res.ok) return undefined;
+      const body = (await res.json()) as { attributes?: { current_position?: number } };
+      return body.attributes?.current_position;
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Drive covers to a preset position by invoking the household's HA script
+   * (`script.turn_on`). The entity list and target position are nested under
+   * `variables` so the cover list is never mistaken for the service target.
+   */
+  callPositionScript(
+    scriptEntityId: string,
+    entityIds: readonly string[],
+    position: number,
   ): Promise<HaCallResult> {
-    const url = `${this.baseUrl}/api/services/${domain}/${service}`;
+    return this.post(`${this.baseUrl}/api/services/script/turn_on`, {
+      entity_id: scriptEntityId,
+      variables: { entity_id: entityIds, position },
+    });
+  }
+
+  private callService(domain: string, service: string, entityId: string): Promise<HaCallResult> {
+    return this.post(`${this.baseUrl}/api/services/${domain}/${service}`, { entity_id: entityId });
+  }
+
+  private async post(url: string, body: unknown): Promise<HaCallResult> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -69,7 +109,7 @@ export class HaRestClient {
           authorization: `Bearer ${this.token}`,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({ entity_id: entityId }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
       if (!res.ok) {

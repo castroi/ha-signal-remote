@@ -40,7 +40,11 @@ export type AuditReasonCode =
   // 'entity-unknown') so audit lines are unambiguous.
   | 'unknown-sender'
   // Fix item 4 (MED): per-entity HA-call failure in an all-covers command.
-  | 'entity-issue-failed';
+  | 'entity-issue-failed'
+  // Issue #1: preset-position cover commands — live position unreadable, and a
+  // deliberate no-op where the cover is already at/past the requested position.
+  | 'position-unknown'
+  | 'noop-already-there';
 
 export interface AuditEvent {
   readonly ts: number;

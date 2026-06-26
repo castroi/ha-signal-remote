@@ -22,6 +22,12 @@ function testConfig(): Config {
   });
 }
 
+// Default stubs for the preset-only port methods; non-preset tests never hit them.
+const noPositionPort = {
+  getCoverPosition: async (): Promise<number | undefined> => undefined,
+  callPositionScript: async () => ({ ok: true }) as const,
+};
+
 function harness(nowRef = { t: 1_000_000 }) {
   const sends: { message: string }[] = [];
   const haCalls: { entityId: string; verb: string }[] = [];
@@ -32,6 +38,7 @@ function harness(nowRef = { t: 1_000_000 }) {
     now: () => nowRef.t,
     emitNotice: (text) => notices.push(text),
     haRest: {
+      ...noPositionPort,
       callCover: vi.fn(async (entityId: string, verb: string) => {
         haCalls.push({ entityId, verb });
         return { ok: true } as const;
@@ -143,6 +150,7 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
       emitNotice: () => {},
       audit,
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async () => { haCalls.push(1); return { ok: true } as const; }),
         callLight: vi.fn(async () => { haCalls.push(1); return { ok: true } as const; }),
       },
@@ -277,6 +285,7 @@ describe('Item 1: confirm flow wired end-to-end through handleEnvelope', () => {
       now: () => nowRef.t,
       emitNotice: () => {},
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async (entityId, verb) => { haCalls.push({ entityId, verb }); return { ok: true } as const; }),
         callLight: vi.fn(async () => ({ ok: true } as const)),
       },
@@ -359,6 +368,7 @@ describe('Item 2: future-timestamp guard routed to clock-unhealthy path', () => 
       now: () => nowRef.t,
       emitNotice: () => {},
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async (id, verb) => { haCalls.push({ entityId: id, verb }); return { ok: true } as const; }),
         callLight: vi.fn(async () => ({ ok: true } as const)),
       },
@@ -392,6 +402,7 @@ describe('Item 3: AuditLogger wired into Bridge', () => {
       emitNotice: () => {},
       audit,
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async () => ({ ok: true } as const)),
         callLight: vi.fn(async () => ({ ok: true } as const)),
       },
@@ -424,6 +435,7 @@ describe('Item 3: AuditLogger wired into Bridge', () => {
       emitNotice: () => {},
       audit,
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async () => ({ ok: true } as const)),
         callLight: vi.fn(async () => ({ ok: true } as const)),
       },
@@ -457,7 +469,7 @@ describe('Item 3: AuditLogger wired into Bridge', () => {
       now: () => nowRef.t,
       emitNotice: () => {},
       audit,
-      haRest: { callCover: vi.fn(async () => ({ ok: true } as const)), callLight: vi.fn(async () => ({ ok: true } as const)) },
+      haRest: { ...noPositionPort, callCover: vi.fn(async () => ({ ok: true } as const)), callLight: vi.fn(async () => ({ ok: true } as const)) },
       signal: { send: vi.fn(async () => true) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
     });
@@ -487,6 +499,7 @@ describe('Item 4: ClockSource integration — skew over threshold disables cover
       now: () => nowRef.t,
       emitNotice: () => {},
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async (id, verb) => { haCalls.push({ entityId: id, verb }); return { ok: true } as const; }),
         callLight: vi.fn(async (id, verb) => { haCalls.push({ entityId: id, verb }); return { ok: true } as const; }),
       },
@@ -538,6 +551,7 @@ describe('Item 6: markIssueFailed prevents false success ack', () => {
       now: () => nowRef.t,
       emitNotice: () => {},
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async () => ({ ok: false, reason: 'failed' } as const)),
         callLight: vi.fn(async () => ({ ok: true } as const)),
       },
@@ -590,6 +604,7 @@ describe('Item 8: per-entity completion deadlines for all-covers', () => {
       now: () => nowRef.t,
       emitNotice: () => {},
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async () => ({ ok: true } as const)),
         callLight: vi.fn(async () => ({ ok: true } as const)),
       },
@@ -705,6 +720,7 @@ describe('Fix 4 (MED): per-entity failure in all-covers command', () => {
       now: () => nowRef.t,
       emitNotice: () => {},
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async (entityId: string) => {
           coverCallCount++;
           if (entityId === firstCoverId) return { ok: false, reason: 'failed' } as const;
@@ -804,6 +820,7 @@ describe('Fix 6 (MED): new all-covers supersedes prior pending confirm without s
       emitNotice: () => {},
       genCommandId: () => `cmd-${++seq}`,
       haRest: {
+        ...noPositionPort,
         callCover: vi.fn(async (entityId: string, verb: string) => {
           haCalls.push({ entityId, verb });
           return { ok: true } as const;
@@ -866,6 +883,184 @@ describe('Fix 8 (LOW): future-timestamp latch gates subsequent cover commands', 
     await h.bridge.handleEnvelope(envelope('סגור את הסלון', h.nowRef));
     expect(h.haCalls.filter((c) => c.entityId === 'cover.living_room')).toHaveLength(0);
     expect(h.sends.some((s) => s.message.includes('שעון'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #1: per-cover preset target positions (open_to / close_to)
+// ---------------------------------------------------------------------------
+
+function presetHarness(currentPosition: number | undefined, nowRef = { t: 1_000_000 }) {
+  const sends: { message: string }[] = [];
+  const haCalls: { entityId: string; verb: string }[] = [];
+  const scriptCalls: { script: string; entityIds: readonly string[]; position: number }[] = [];
+
+  const bridge = new Bridge({
+    config: testConfig(),
+    now: () => nowRef.t,
+    emitNotice: () => {},
+    haRest: {
+      ...noPositionPort,
+      callCover: vi.fn(async (entityId: string, verb: string) => {
+        haCalls.push({ entityId, verb });
+        return { ok: true } as const;
+      }),
+      callLight: vi.fn(async (entityId: string, verb: string) => {
+        haCalls.push({ entityId, verb });
+        return { ok: true } as const;
+      }),
+      getCoverPosition: vi.fn(async () => currentPosition),
+      callPositionScript: vi.fn(
+        async (script: string, entityIds: readonly string[], position: number) => {
+          scriptCalls.push({ script, entityIds, position });
+          return { ok: true } as const;
+        },
+      ),
+    },
+    signal: {
+      send: vi.fn(async (_u: string, _n: string, message: string) => {
+        sends.push({ message });
+        return true;
+      }),
+    },
+    clock: {
+      snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }),
+    },
+  });
+
+  return { bridge, sends, haCalls, scriptCalls, nowRef };
+}
+
+describe('Issue #1: preset position commands (open_to/close_to)', () => {
+  it('open_to drives the cover via the position script and acks on observed position', async () => {
+    const h = presetHarness(50); // salon open target = 80
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('העלה סלון', h.nowRef));
+
+    // Actuated via the household script, not a native cover call.
+    expect(h.scriptCalls).toContainEqual({
+      script: 'script.covers_up',
+      entityIds: ['cover.living_room'],
+      position: 80,
+    });
+    expect(h.haCalls.filter((c) => c.entityId === 'cover.living_room')).toHaveLength(0);
+    expect(h.sends.some((s) => s.message === 'מבצע…')).toBe(true);
+
+    // Observed position within tolerance of 80 -> success.
+    await h.bridge.onStateChanged('cover.living_room', 'open', 80);
+    expect(h.sends.some((s) => s.message === 'בוצע')).toBe(true);
+  });
+
+  it('a preset move whose target is already reached replies "already there" and does not fire', async () => {
+    const h = presetHarness(30); // salon close target = 30, already at 30
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('הנמך סלון', h.nowRef));
+
+    expect(h.scriptCalls).toHaveLength(0);
+    expect(h.sends.some((s) => s.message.includes('כבר'))).toBe(true);
+  });
+
+  it('a close_to that would reverse direction (cover more closed than target) is a no-op', async () => {
+    const h = presetHarness(20); // current 20, close target 30 -> closing would have to open
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('הנמך סלון', h.nowRef));
+
+    expect(h.scriptCalls).toHaveLength(0);
+    expect(h.sends.some((s) => s.message.includes('כבר'))).toBe(true);
+  });
+
+  it('a cover that reports no position fails closed with a position-unknown reply', async () => {
+    const h = presetHarness(undefined);
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('העלה סלון', h.nowRef));
+
+    expect(h.scriptCalls).toHaveLength(0);
+    expect(h.sends.some((s) => s.message.includes('לא ניתן לקרוא'))).toBe(true);
+  });
+
+  it('the full open verb still uses the native cover service, not the script', async () => {
+    const h = presetHarness(50);
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('פתח סלון', h.nowRef));
+
+    expect(h.haCalls).toContainEqual({ entityId: 'cover.living_room', verb: 'open' });
+    expect(h.scriptCalls).toHaveLength(0);
+  });
+
+  it('a preset all-covers command fires the script for targeted covers and native for the rest', async () => {
+    const h = presetHarness(50);
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('העלה תריסים', h.nowRef));
+    expect(h.sends.some((s) => s.message.includes('כן/לא'))).toBe(true);
+
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('כן', h.nowRef));
+
+    // Covers with a configured open target go through the script.
+    expect(
+      h.scriptCalls.some((c) => c.entityIds[0] === 'cover.living_room' && c.position === 80),
+    ).toBe(true);
+    expect(h.scriptCalls.some((c) => c.entityIds[0] === 'cover.kitchen' && c.position === 90)).toBe(
+      true,
+    );
+    // Covers with no preset for this direction fall back to the native open service.
+    expect(h.haCalls.some((c) => c.entityId === 'cover.kids_room' && c.verb === 'open')).toBe(true);
+  });
+
+  it('a preset open exactly tolerance away is a no-op (strict band boundary)', async () => {
+    const h = presetHarness(75); // salon open target 80, tol 5 -> gap is exactly 5, not > 5
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('העלה סלון', h.nowRef));
+
+    expect(h.scriptCalls).toHaveLength(0);
+    expect(h.sends.some((s) => s.message.includes('כבר'))).toBe(true);
+  });
+
+  it('a preset open one point past tolerance does move', async () => {
+    const h = presetHarness(74); // gap is 6 > 5 -> fires
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('העלה סלון', h.nowRef));
+
+    expect(h.scriptCalls).toContainEqual({
+      script: 'script.covers_up',
+      entityIds: ['cover.living_room'],
+      position: 80,
+    });
+  });
+
+  it('all-covers preset skips the per-cover reversal guard (fires even when a single cover would no-op)', async () => {
+    const h = presetHarness(80); // 80 == salon open target: a single "העלה סלון" would be a no-op
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('העלה תריסים', h.nowRef));
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('כן', h.nowRef));
+
+    // Despite current == target, the batch still issues the script for every targeted cover
+    // (direction safety is delegated to the HA script, not the bridge, for the batch path).
+    expect(
+      h.scriptCalls.some((c) => c.entityIds[0] === 'cover.living_room' && c.position === 80),
+    ).toBe(true);
+    expect(h.scriptCalls.some((c) => c.entityIds[0] === 'cover.kitchen' && c.position === 90)).toBe(
+      true,
+    );
   });
 });
 
