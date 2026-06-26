@@ -91,11 +91,13 @@ cp config/aliases.example.yaml config/aliases.yaml
 
 ```yaml
 verbs:
-  open:  ["פתח", "תפתח", "להרים", "הרם"]
-  close: ["סגור", "תסגור", "להוריד", "הורד"]
-  stop:  ["עצור", "תעצור", "הפסק"]
-  on:    ["הדלק", "תדליק", "להדליק"]
-  off:   ["כבה", "תכבה", "לכבות"]
+  open:    ["פתח", "תפתח", "להרים", "הרם"]
+  close:   ["סגור", "תסגור", "להוריד", "הורד"]
+  stop:    ["עצור", "תעצור", "הפסק"]
+  on:      ["הדלק", "תדליק", "להדליק"]
+  off:     ["כבה", "תכבה", "לכבות"]
+  open_to:  ["העלה"]      # drive a cover to its configured open_position
+  close_to: ["הנמך"]      # drive a cover to its configured close_position
 
 entities:
   salon:
@@ -103,12 +105,31 @@ entities:
     entity_id: cover.living_room
     completion_timeout_ms: 30000
     aliases: ["סלון"]
+    open_position: 80      # target for open_to (omit → full open)
+    close_position: 30     # target for close_to (omit → full close)
+    tolerance_percent: 5   # optional per-cover completion band
 
 scopes:
   all_covers:
     word: "תריסים"
     expands_to_type: cover
+
+# The HA scripts the bridge calls to drive covers to a preset position.
+position_scripts:
+  open: script.covers_up
+  close: script.covers_down
+  default_tolerance_percent: 3
 ```
+
+**Preset positions (open_to / close_to).** The full `open`/`close` verbs always run
+`cover.open_cover` / `close_cover` (100 / 0). The separate `open_to` / `close_to` verbs
+drive a cover to its per-entity `open_position` / `close_position` via the household
+`position_scripts` (e.g. `covers_up` / `covers_down`, which accept an `entity_id` list and a
+`position`). Completion is confirmed by the observed `current_position` landing within the
+tolerance band. Before firing, the bridge reads the cover's live position and **refuses a move
+that would reverse direction** (e.g. a `close_to 30` on a cover already at 20) — replying
+"already there" rather than moving the wrong way. A preset verb on a cover with no configured
+target for that direction falls back to full open/close.
 
 ---
 
@@ -118,6 +139,8 @@ A message is `verb + entity`, e.g. `סגור סלון` (close salon) or `פתח 
 
 | Word | Meaning |
 | --- | --- |
+| `פתח` / `סגור` | Full open (100) / full close (0) of a cover |
+| `העלה` / `הנמך` | Open / close a cover **to its configured preset position** (words are configurable) |
 | `תריסים` | All-covers scope — prompts a context-bound `כן`/`לא` confirmation (20s expiry) before acting |
 | `כן` / `לא` | Yes / No — confirm or cancel a pending all-covers action |
 | `סטטוס` | Status — always answered for authorized senders: WS / clock / kill-switch / covers-enabled state |
