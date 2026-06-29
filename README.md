@@ -15,7 +15,7 @@ Signal user ──(Hebrew text)──► signal-cli-rest-api ──WS──► b
                                                        ◄──WS── (state_changed)
 ```
 
-- **Receives** messages over an outbound JSON-RPC WebSocket to a [`bbernhard/signal-cli-rest-api`](https://github.com/bbernhard/signal-cli-rest-api) container (`MODE=json-rpc`).
+- **Receives** messages over an outbound JSON-RPC WebSocket. In deployment the bridge connects only to its own per-bot [`signal-wrapper`](https://github.com/castroi/signal-wrapper) (a sender-binding proxy) using a bearer token; the wrapper pins the bot's number and forwards to the shared [`bbernhard/signal-cli-rest-api`](https://github.com/bbernhard/signal-cli-rest-api) container (`MODE=json-rpc`).
 - **Commands** Home Assistant over its REST API (`cover.open_cover` / `close_cover` / `stop_cover`, `light.turn_on` / `turn_off`).
 - **Tracks** completion by subscribing to HA `state_changed` over a second WebSocket.
 - **Replies** to the user over the signal-cli REST endpoint.
@@ -55,14 +55,14 @@ The pure core means most behavior is unit-testable without Signal or Home Assist
 
 - **Node.js 20** (`>=20.19 <21`) and **pnpm** (`pnpm@9.15.9`) for development.
 - For deployment: **Docker + Docker Compose v2**.
-- A running `bbernhard/signal-cli-rest-api` container in `MODE=json-rpc` holding the bot's dedicated number.
+- A running `bbernhard/signal-cli-rest-api` container (`MODE=json-rpc`) holding the bot's dedicated number, reached through this bot's own `signal-wrapper` (sender-binding proxy) — see [`deploy/ha-signal-remote`](deploy/ha-signal-remote).
 - **Home Assistant** reachable on the private network, with a long-lived access token.
 
 ---
 
 ## Configuration
 
-Secrets are **env-only** — never committed, never logged. Copy the template and fill it in:
+Secrets are **never committed and never logged**. Most config is env; the wrapper bearer token is a **file-mounted Docker secret** (`SIGNAL_TOKEN_FILE`), not an env var. Copy the template and fill it in:
 
 ```sh
 cp .env.example .env
@@ -72,10 +72,12 @@ cp .env.example .env
 | --- | --- | --- |
 | `HA_BASE_URL` | ✓ | Home Assistant base URL, e.g. `http://homeassistant:8123` |
 | `HA_TOKEN` | ✓ | HA long-lived access token (privileged — rotate if the Pi is exposed) |
-| `SIGNAL_API_URL` | ✓ | signal-cli-rest-api base URL, e.g. `http://signal-cli-rest-api:8080` |
+| `SIGNAL_API_URL` | ✓ | The bot's **wrapper** URL (not the raw daemon), e.g. `http://wrapper-ha:8080` |
+| `SIGNAL_TOKEN_FILE` / `SIGNAL_TOKEN` | ✓ | Wrapper bearer token. Prefer `SIGNAL_TOKEN_FILE` (a Docker-secret path, kept out of `docker inspect`); `SIGNAL_TOKEN` env is the fallback |
 | `BOT_NUMBER` | ✓ | The bot's dedicated Signal number (E.164) |
 | `ALLOWLIST_UUIDS` | ✓ | Comma-separated authorized sender ACI UUIDs (at least one) |
 | `AUDIT_SALT` | ✓ | Salt for the audit-log UUID hash — generate with `openssl rand -hex 32` |
+| `SIGNAL_BACKEND_URL` | | Deployment only — the shared signal-cli's URL for the wrapper's `BACKEND_URL` (default `http://signal-api:8080`) |
 | `CLOCK_REFERENCES` | | Comma-separated time-reference URLs (defaults to worldtimeapi.org + timeapi.io) |
 | `ALIAS_PATH` | | Path to the alias table (default `/app/config/aliases.yaml`) |
 

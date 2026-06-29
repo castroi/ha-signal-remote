@@ -21,3 +21,6 @@ dev/homeassistant/*
 
 # Local deployment manifests — kept on the deploy host, not versioned here
 deploy/
+
+# per-bot wrapper token (docker secret) — never commit
+secrets/

@@ -159,7 +159,11 @@ export function composeAndStart(opts: ComposeOptions): RuntimeHandle {
     if (shutdownRequested) return;
 
     const wsUrl = `${cfg.secrets.signalApiUrl.replace(/^http/, 'ws')}/v1/receive/${encodeURIComponent(cfg.secrets.botNumber)}`;
-    const ws = new WebSocket(wsUrl);
+    // Authenticate the receive WS to the wrapper (WS_REQUIRE_AUTH). The `ws`
+    // package accepts request headers; never log the token.
+    const ws = new WebSocket(wsUrl, {
+      headers: { Authorization: `Bearer ${cfg.secrets.signalToken}` },
+    });
     signalWs = ws;
 
     const socket: SignalSocket = {
@@ -172,6 +176,7 @@ export function composeAndStart(opts: ComposeOptions): RuntimeHandle {
       socket,
       botNumber: cfg.secrets.botNumber,
       apiUrl: cfg.secrets.signalApiUrl,
+      signalToken: cfg.secrets.signalToken,
       allowlist: cfg.secrets.allowlistUuids,
       onEnvelope: (envelope) => {
         // Fire-and-forget; errors in handleEnvelope are swallowed by the bridge.

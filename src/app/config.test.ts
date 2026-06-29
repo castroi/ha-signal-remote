@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, join } from 'node:path';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import {
   DEFAULT_TUNABLES,
   RESERVED_WORDS,
@@ -17,6 +19,7 @@ const validEnv = (): NodeJS.ProcessEnv => ({
   HA_TOKEN: 'llat-token',
   HA_BASE_URL: 'http://localhost:8123',
   SIGNAL_API_URL: 'http://localhost:8080',
+  SIGNAL_TOKEN: 'wrapper-token',
   BOT_NUMBER: '+15550001111',
   ALLOWLIST_UUIDS: 'uuid-a,uuid-b',
   AUDIT_SALT: 'some-salt',
@@ -214,6 +217,7 @@ describe('secret loading (fail-fast, design §6)', () => {
   it('reads all required secrets from env', () => {
     const secrets = loadSecrets(validEnv());
     expect(secrets.haToken).toBe('llat-token');
+    expect(secrets.signalToken).toBe('wrapper-token');
     expect(secrets.allowlistUuids.has('uuid-a')).toBe(true);
     expect(secrets.allowlistUuids.has('uuid-b')).toBe(true);
   });
@@ -224,10 +228,39 @@ describe('secret loading (fail-fast, design §6)', () => {
     expect(() => loadSecrets(env)).toThrow(/HA_TOKEN/);
   });
 
+  it('throws when SIGNAL_TOKEN is missing', () => {
+    const env = validEnv();
+    delete env.SIGNAL_TOKEN;
+    expect(() => loadSecrets(env)).toThrow(/SIGNAL_TOKEN/);
+  });
+
   it('throws when the allowlist is empty', () => {
     const env = validEnv();
     env.ALLOWLIST_UUIDS = '';
     expect(() => loadSecrets(env)).toThrow(/ALLOWLIST_UUIDS/);
+  });
+
+  it('reads SIGNAL_TOKEN from SIGNAL_TOKEN_FILE, which takes precedence over the env var', () => {
+    const tokenFile = join(mkdtempSync(join(tmpdir(), 'ha-secret-')), 'signal_token');
+    writeFileSync(tokenFile, 'file-token\n'); // trailing newline must be trimmed
+    const env = validEnv();
+    env.SIGNAL_TOKEN = 'env-token';
+    env.SIGNAL_TOKEN_FILE = tokenFile;
+    expect(loadSecrets(env).signalToken).toBe('file-token');
+  });
+
+  it('throws when the secret file is empty', () => {
+    const tokenFile = join(mkdtempSync(join(tmpdir(), 'ha-secret-')), 'signal_token');
+    writeFileSync(tokenFile, '  \n');
+    const env = validEnv();
+    env.SIGNAL_TOKEN_FILE = tokenFile;
+    expect(() => loadSecrets(env)).toThrow(/empty/);
+  });
+
+  it('throws a clean error (code + path, not contents) when the secret file is unreadable', () => {
+    const env = validEnv();
+    env.SIGNAL_TOKEN_FILE = join(tmpdir(), 'no-such-dir', 'signal_token');
+    expect(() => loadSecrets(env)).toThrow(/Cannot read secret file for SIGNAL_TOKEN \(ENOENT\)/);
   });
 });
 

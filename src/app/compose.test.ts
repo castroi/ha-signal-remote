@@ -20,6 +20,7 @@ const fakeEnv: NodeJS.ProcessEnv = {
   HA_TOKEN: 'fake-ha-token',
   HA_BASE_URL: 'http://127.0.0.1:18123',
   SIGNAL_API_URL: 'http://127.0.0.1:18080',
+  SIGNAL_TOKEN: 'wrapper-token',
   BOT_NUMBER: '+15550001234',
   ALLOWLIST_UUIDS: 'aaaaaaaa-0000-0000-0000-000000000001',
   AUDIT_SALT: 'test-salt-for-compose',
