@@ -262,6 +262,18 @@ describe('secret loading (fail-fast, design §6)', () => {
     env.SIGNAL_TOKEN_FILE = join(tmpdir(), 'no-such-dir', 'signal_token');
     expect(() => loadSecrets(env)).toThrow(/Cannot read secret file for SIGNAL_TOKEN \(ENOENT\)/);
   });
+
+  it('trims surrounding whitespace from the SIGNAL_TOKEN env fallback', () => {
+    const env = validEnv();
+    env.SIGNAL_TOKEN = '  spaced-token\n';
+    expect(loadSecrets(env).signalToken).toBe('spaced-token');
+  });
+
+  it('throws when the SIGNAL_TOKEN env value is whitespace-only', () => {
+    const env = validEnv();
+    env.SIGNAL_TOKEN = '   ';
+    expect(() => loadSecrets(env)).toThrow(/Missing required secret: SIGNAL_TOKEN/);
+  });
 });
 
 describe('loadConfig integration', () => {

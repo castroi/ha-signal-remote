@@ -342,7 +342,10 @@ function requireSecret(env: NodeJS.ProcessEnv, key: string): string {
     }
     return v;
   }
-  return requireEnv(env, key);
+  // Env fallback: trim too, so a stray newline/space can't slip into the token.
+  // requireEnv already rejects whitespace-only; this also strips a trailing
+  // newline from a non-empty value, consistent with the file branch above.
+  return requireEnv(env, key).trim();
 }
 
 export function loadSecrets(env: NodeJS.ProcessEnv): Secrets {
