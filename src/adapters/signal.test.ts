@@ -130,6 +130,36 @@ describe('SignalAdapter (design §2, §6 A01)', () => {
     expect((calls[0]!.body as { message: string }).message).toBe('מבצע…');
   });
 
+  it('attaches the wrapper bearer token when signalToken is set', async () => {
+    const calls: { headers: Record<string, string> }[] = [];
+    const sendImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push({ headers: init.headers as Record<string, string> });
+      return new Response('{}', { status: 201 });
+    }) as unknown as typeof fetch;
+    const adapter = new SignalAdapter({
+      socket: new FakeSocket(),
+      botNumber: '+15550001111',
+      apiUrl: 'http://localhost:8080',
+      signalToken: 'wrapper-token',
+      allowlist,
+      fetchImpl: sendImpl,
+      onEnvelope: () => {},
+    });
+    await adapter.send('uuid-allowed', '+15559998888', 'מבצע…');
+    expect(calls[0]!.headers.authorization).toBe('Bearer wrapper-token');
+  });
+
+  it('omits Authorization when no signalToken is configured', async () => {
+    const calls: { headers: Record<string, string> }[] = [];
+    const sendImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push({ headers: init.headers as Record<string, string> });
+      return new Response('{}', { status: 201 });
+    }) as unknown as typeof fetch;
+    const { adapter } = makeAdapter(sendImpl);
+    await adapter.send('uuid-allowed', '+15559998888', 'מבצע…');
+    expect(calls[0]!.headers.authorization).toBeUndefined();
+  });
+
   it('falls back to sourceUuid as recipient when the phone number is empty', async () => {
     const calls: { body: { recipients: string[] } }[] = [];
     const sendImpl = vi.fn(async (_url: string, init: RequestInit) => {

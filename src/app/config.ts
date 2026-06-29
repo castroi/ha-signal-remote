@@ -306,6 +306,7 @@ export interface Secrets {
   readonly haToken: string;
   readonly haBaseUrl: string;
   readonly signalApiUrl: string;
+  readonly signalToken: string;
   readonly botNumber: string;
   readonly allowlistUuids: ReadonlySet<string>;
   readonly auditSalt: string;
@@ -317,6 +318,34 @@ function requireEnv(env: NodeJS.ProcessEnv, key: string): string {
     throw new Error(`Missing required secret: ${key}`);
   }
   return value;
+}
+
+/**
+ * Read a secret from `<KEY>_FILE` (a Docker secret, preferred) or `<KEY>` env.
+ * Keeps the value out of `docker inspect` when the file form is used.
+ */
+function requireSecret(env: NodeJS.ProcessEnv, key: string): string {
+  const file = env[`${key}_FILE`];
+  if (file !== undefined && file.trim() !== '') {
+    let v: string;
+    try {
+      v = readFileSync(file, 'utf8').trim();
+    } catch (err) {
+      // Surface the failure code + path (never the contents) so a misconfigured
+      // secret mount — e.g. a 0600 file the container's uid can't read — is
+      // diagnosable, instead of a raw fs stack trace.
+      const code = (err as NodeJS.ErrnoException).code ?? 'read error';
+      throw new Error(`Cannot read secret file for ${key} (${code}): ${file}`, { cause: err });
+    }
+    if (v === '') {
+      throw new Error(`Secret file for ${key} is empty: ${file}`);
+    }
+    return v;
+  }
+  // Env fallback: trim too, so a stray newline/space can't slip into the token.
+  // requireEnv already rejects whitespace-only; this also strips a trailing
+  // newline from a non-empty value, consistent with the file branch above.
+  return requireEnv(env, key).trim();
 }
 
 export function loadSecrets(env: NodeJS.ProcessEnv): Secrets {
@@ -334,6 +363,7 @@ export function loadSecrets(env: NodeJS.ProcessEnv): Secrets {
     haToken: requireEnv(env, 'HA_TOKEN'),
     haBaseUrl: requireEnv(env, 'HA_BASE_URL'),
     signalApiUrl: requireEnv(env, 'SIGNAL_API_URL'),
+    signalToken: requireSecret(env, 'SIGNAL_TOKEN'),
     botNumber: requireEnv(env, 'BOT_NUMBER'),
     allowlistUuids,
     auditSalt: requireEnv(env, 'AUDIT_SALT'),

@@ -29,6 +29,8 @@ export interface SignalAdapterOptions {
   readonly socket: SignalSocket;
   readonly botNumber: string;
   readonly apiUrl: string;
+  /** Bearer token presented to the per-bot wrapper on /v2/send (optional in tests). */
+  readonly signalToken?: string;
   readonly allowlist: ReadonlySet<string>;
   readonly onEnvelope: (envelope: IncomingEnvelope) => void;
   readonly fetchImpl?: typeof fetch;
@@ -56,6 +58,7 @@ interface RpcFrame {
 export class SignalAdapter {
   private readonly botNumber: string;
   private readonly apiUrl: string;
+  private readonly signalToken: string | undefined;
   private readonly allowlist: ReadonlySet<string>;
   private readonly onEnvelope: (envelope: IncomingEnvelope) => void;
   private readonly fetchImpl: typeof fetch;
@@ -64,6 +67,7 @@ export class SignalAdapter {
   constructor(opts: SignalAdapterOptions) {
     this.botNumber = opts.botNumber;
     this.apiUrl = opts.apiUrl.replace(/\/$/, '');
+    this.signalToken = opts.signalToken;
     this.allowlist = opts.allowlist;
     this.onEnvelope = opts.onEnvelope;
     this.fetchImpl = opts.fetchImpl ?? fetch;
@@ -112,10 +116,15 @@ export class SignalAdapter {
     // Signal envelopes often omit the sender's phone number; identity is the
     // ACI (sourceUuid). Fall back to it so the reply has a valid recipient.
     const to = recipient || sourceUuid;
+    // The per-bot wrapper requires a bearer token on /v2/send (sender-binding).
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (this.signalToken) {
+      headers.authorization = `Bearer ${this.signalToken}`;
+    }
     try {
       const res = await this.fetchImpl(`${this.apiUrl}/v2/send`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify({
           number: this.botNumber,
           recipients: [to],
