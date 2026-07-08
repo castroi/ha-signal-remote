@@ -11,7 +11,8 @@ import {
   type Effect,
   type EntityRef,
   type CoverVerb,
-  type LightVerb,
+  type ToggleDomain,
+  type ToggleVerb,
   type PositionTarget,
 } from '../core/state-machine.js';
 import { WsHealthGate } from '../adapters/ha-ws.js';
@@ -36,7 +37,8 @@ import type { IncomingEnvelope } from '../adapters/signal.js';
 
 export interface HaRestPort {
   callCover(entityId: string, verb: CoverVerb): Promise<HaCallResult>;
-  callLight(entityId: string, verb: LightVerb): Promise<HaCallResult>;
+  /** turn_on / turn_off for the single-stage toggle domains (light, switch). */
+  callToggle(domain: ToggleDomain, entityId: string, verb: ToggleVerb): Promise<HaCallResult>;
   /** Read a cover's live current_position (0–100); undefined when unreadable/unreported. */
   getCoverPosition(entityId: string): Promise<number | undefined>;
   /** Drive covers to a preset position via the household HA script. */
@@ -681,8 +683,8 @@ export class Bridge {
         case 'issue-cover-stop':
           await this.haRest.callCover(e.entityId, 'stop');
           break;
-        case 'issue-light': {
-          const r = await this.haRest.callLight(e.entityId, e.verb);
+        case 'issue-toggle': {
+          const r = await this.haRest.callToggle(e.domain, e.entityId, e.verb);
           if (!r.ok) {
             const failEffects = this.stateMachine.markIssueFailed(e.commandId);
             await this.runEffects(failEffects);
@@ -856,7 +858,7 @@ function toRef(entity: EntityDef, target?: PositionTarget): EntityRef {
 }
 
 /** Map a (possibly preset) verb to its base actuation direction. */
-function baseVerb(verb: Verb): CoverVerb | LightVerb {
+function baseVerb(verb: Verb): CoverVerb | ToggleVerb {
   if (verb === 'open_to') return 'open';
   if (verb === 'close_to') return 'close';
   return verb;

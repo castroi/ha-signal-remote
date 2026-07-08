@@ -10,7 +10,7 @@
  *
  * Locked behaviors:
  * - Two-stage cover feedback (progress ack on receipt, success on observed target);
- *   single-stage for lights.
+ *   single-stage for lights and switches (toggles).
  * - Per-entity completion timeout → `timeout` + manual-check reply, no success ack.
  * - Conflict preemption: a new command for an entity already `issued` issues stop
  *   then the new direction; the old command → `preempted`. No queue.
@@ -21,8 +21,11 @@
  */
 
 export type CoverVerb = 'open' | 'close' | 'stop';
-export type LightVerb = 'on' | 'off';
-export type Verb = CoverVerb | LightVerb;
+export type ToggleVerb = 'on' | 'off';
+export type Verb = CoverVerb | ToggleVerb;
+
+/** HA service domains that share the single-stage turn_on/turn_off pipeline. */
+export type ToggleDomain = 'light' | 'switch';
 
 /** A preset move is complete when the observed position is within ±tolerance of the target. */
 function reachesPosition(target: PositionTarget, observedPosition?: number): boolean {
@@ -38,7 +41,7 @@ export interface PositionTarget {
 
 export interface EntityRef {
   readonly entityId: string;
-  readonly type: 'cover' | 'light';
+  readonly type: 'cover' | ToggleDomain;
   readonly completionTimeoutMs: number;
   /**
    * When set, this is a preset-position command: actuation goes through the
@@ -66,7 +69,13 @@ export type Effect =
       position: number;
     }
   | { kind: 'issue-cover-stop'; commandId: string; entityId: string }
-  | { kind: 'issue-light'; commandId: string; entityId: string; verb: LightVerb }
+  | {
+      kind: 'issue-toggle';
+      commandId: string;
+      entityId: string;
+      domain: ToggleDomain;
+      verb: ToggleVerb;
+    }
   | { kind: 'reply-progress'; commandId: string; entityId: string }
   | { kind: 'reply-success'; commandId: string }
   | { kind: 'reply-timeout'; commandId: string; entityId: string }
@@ -219,10 +228,11 @@ export class CommandStateMachine {
         rec.completionDeadlines.set(entity.entityId, now + entity.completionTimeoutMs);
       } else {
         effects.push({
-          kind: 'issue-light',
+          kind: 'issue-toggle',
           commandId: rec.commandId,
           entityId: entity.entityId,
-          verb: rec.verb as LightVerb,
+          domain: entity.type,
+          verb: rec.verb as ToggleVerb,
         });
         rec.completionDeadlines.set(entity.entityId, now + entity.completionTimeoutMs);
       }

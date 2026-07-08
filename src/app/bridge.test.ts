@@ -31,7 +31,7 @@ const noPositionPort = {
 
 function harness(nowRef = { t: 1_000_000 }) {
   const sends: { message: string }[] = [];
-  const haCalls: { entityId: string; verb: string }[] = [];
+  const haCalls: { entityId: string; verb: string; domain?: string }[] = [];
   const notices: string[] = [];
 
   const bridge = new Bridge({
@@ -44,8 +44,8 @@ function harness(nowRef = { t: 1_000_000 }) {
         haCalls.push({ entityId, verb });
         return { ok: true } as const;
       }),
-      callLight: vi.fn(async (entityId: string, verb: string) => {
-        haCalls.push({ entityId, verb });
+      callToggle: vi.fn(async (domain: string, entityId: string, verb: string) => {
+        haCalls.push({ entityId, verb, domain });
         return { ok: true } as const;
       }),
     },
@@ -105,7 +105,56 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
     // Light works without WS.
     h.nowRef.t += 1;
     await h.bridge.handleEnvelope(envelope('הדלק גינה', h.nowRef));
-    expect(h.haCalls).toContainEqual({ entityId: 'light.garden', verb: 'on' });
+    expect(h.haCalls).toContainEqual({ entityId: 'light.garden', verb: 'on', domain: 'light' });
+
+    // Switch works without WS too (issue #25: toggles are never WS-gated).
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('הדלק מאוורר', h.nowRef));
+    expect(h.haCalls).toContainEqual({ entityId: 'switch.fan', verb: 'on', domain: 'switch' });
+  });
+
+  it('drives a switch command single-stage through the switch domain (issue #25)', async () => {
+    const h = harness();
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('הדלק מאוורר', h.nowRef));
+    expect(h.haCalls).toContainEqual({ entityId: 'switch.fan', verb: 'on', domain: 'switch' });
+    // Single-stage: no progress ack for a toggle.
+    expect(h.sends.some((s) => s.message === 'מבצע…')).toBe(false);
+
+    await h.bridge.onStateChanged('switch.fan', 'on');
+    expect(h.sends.some((s) => s.message === 'בוצע')).toBe(true);
+
+    // The off verb drives the other service.
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('כבה שקע', h.nowRef));
+    expect(h.haCalls).toContainEqual({
+      entityId: 'switch.garden_socket',
+      verb: 'off',
+      domain: 'switch',
+    });
+  });
+
+  it('kill switch blocks a switch command like any other', async () => {
+    const h = harness();
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+    h.bridge.engageKill();
+
+    await h.bridge.handleEnvelope(envelope('הדלק מאוורר', h.nowRef));
+    expect(h.haCalls.filter((c) => c.entityId === 'switch.fan')).toHaveLength(0);
+    expect(h.sends.some((s) => s.message === 'המערכת בכיבוי חירום')).toBe(true);
+  });
+
+  it('help reply lists the configured switches (issue #25)', async () => {
+    const h = harness();
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+    await h.bridge.handleEnvelope(envelope('עזרה', h.nowRef));
+    const help = h.sends.at(-1)?.message ?? '';
+    expect(help).toContain('מאוורר');
+    expect(help).toContain('שקע');
   });
 
   it('drops a duplicate delivery (same uuid+ts+text): single action, single reply', async () => {
@@ -153,7 +202,7 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
       haRest: {
         ...noPositionPort,
         callCover: vi.fn(async () => { haCalls.push(1); return { ok: true } as const; }),
-        callLight: vi.fn(async () => { haCalls.push(1); return { ok: true } as const; }),
+        callToggle: vi.fn(async () => { haCalls.push(1); return { ok: true } as const; }),
       },
       signal: { send: vi.fn(async (_u: string, _n: string, message: string) => { sends.push({ message }); return true; }) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
@@ -290,7 +339,7 @@ describe('Item 1: confirm flow wired end-to-end through handleEnvelope', () => {
       haRest: {
         ...noPositionPort,
         callCover: vi.fn(async (entityId, verb) => { haCalls.push({ entityId, verb }); return { ok: true } as const; }),
-        callLight: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: true } as const)),
       },
       signal: { send: vi.fn(async (_u, _n, msg) => { sends.push(msg); return true; }) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
@@ -357,7 +406,7 @@ describe('Item 2: future-timestamp guard routed to clock-unhealthy path', () => 
     await h.bridge.handleEnvelope(slightlyFutureEnv);
 
     // Light command goes through (within tolerance).
-    expect(h.haCalls).toContainEqual({ entityId: 'light.garden', verb: 'on' });
+    expect(h.haCalls).toContainEqual({ entityId: 'light.garden', verb: 'on', domain: 'light' });
   });
 
   it('clockHealth() threads futureEnvelopeMs into evaluateClockHealth (integration smoke)', () => {
@@ -373,7 +422,7 @@ describe('Item 2: future-timestamp guard routed to clock-unhealthy path', () => 
       haRest: {
         ...noPositionPort,
         callCover: vi.fn(async (id, verb) => { haCalls.push({ entityId: id, verb }); return { ok: true } as const; }),
-        callLight: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: true } as const)),
       },
       signal: { send: vi.fn(async (_u, _n, msg) => { sends.push(msg); return true; }) },
       // Inject a clock reporting excessive skew (> 30s threshold).
@@ -407,7 +456,7 @@ describe('Item 3: AuditLogger wired into Bridge', () => {
       haRest: {
         ...noPositionPort,
         callCover: vi.fn(async () => ({ ok: true } as const)),
-        callLight: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: true } as const)),
       },
       signal: { send: vi.fn(async () => true) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
@@ -440,7 +489,7 @@ describe('Item 3: AuditLogger wired into Bridge', () => {
       haRest: {
         ...noPositionPort,
         callCover: vi.fn(async () => ({ ok: true } as const)),
-        callLight: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: true } as const)),
       },
       signal: { send: vi.fn(async () => true) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
@@ -472,7 +521,7 @@ describe('Item 3: AuditLogger wired into Bridge', () => {
       now: () => nowRef.t,
       emitNotice: () => {},
       audit,
-      haRest: { ...noPositionPort, callCover: vi.fn(async () => ({ ok: true } as const)), callLight: vi.fn(async () => ({ ok: true } as const)) },
+      haRest: { ...noPositionPort, callCover: vi.fn(async () => ({ ok: true } as const)), callToggle: vi.fn(async () => ({ ok: true } as const)) },
       signal: { send: vi.fn(async () => true) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
     });
@@ -504,7 +553,7 @@ describe('Item 4: ClockSource integration — skew over threshold disables cover
       haRest: {
         ...noPositionPort,
         callCover: vi.fn(async (id, verb) => { haCalls.push({ entityId: id, verb }); return { ok: true } as const; }),
-        callLight: vi.fn(async (id, verb) => { haCalls.push({ entityId: id, verb }); return { ok: true } as const; }),
+        callToggle: vi.fn(async (_domain, id, verb) => { haCalls.push({ entityId: id, verb }); return { ok: true } as const; }),
       },
       signal: { send: vi.fn(async (_u, _n, msg) => { sends.push(msg); return true; }) },
       clock: clockPort,
@@ -521,6 +570,11 @@ describe('Item 4: ClockSource integration — skew over threshold disables cover
     nowRef.t += 1;
     await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message: 'הדלק גינה' });
     expect(haCalls).toContainEqual({ entityId: 'light.garden', verb: 'on' });
+
+    // Switch command must still work too (issue #25: clock only gates covers).
+    nowRef.t += 1;
+    await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message: 'הדלק מאוורר' });
+    expect(haCalls).toContainEqual({ entityId: 'switch.fan', verb: 'on' });
   });
 });
 
@@ -556,7 +610,7 @@ describe('Item 6: markIssueFailed prevents false success ack', () => {
       haRest: {
         ...noPositionPort,
         callCover: vi.fn(async () => ({ ok: false, reason: 'failed' } as const)),
-        callLight: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: true } as const)),
       },
       signal: { send: vi.fn(async (_u, _n, msg) => { sends.push(msg); return true; }) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
@@ -573,6 +627,32 @@ describe('Item 6: markIssueFailed prevents false success ack', () => {
     // A subsequent state-changed event must NOT produce a false success.
     const sendsBefore = sends.length;
     await bridge.onStateChanged('cover.living_room', 'closed');
+    expect(sends.slice(sendsBefore).some((m) => m === 'בוצע')).toBe(false);
+  });
+
+  it('a failed switch call yields an honest failure reply, never a late success (issue #25)', async () => {
+    const nowRef = { t: 1_000_000 };
+    const sends: string[] = [];
+    const bridge = new Bridge({
+      config: testConfig(),
+      now: () => nowRef.t,
+      emitNotice: () => {},
+      haRest: {
+        ...noPositionPort,
+        callCover: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: false, reason: 'failed' } as const)),
+      },
+      signal: { send: vi.fn(async (_u, _n, msg) => { sends.push(msg); return true; }) },
+      clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
+    });
+    bridge.onWsConnected();
+    nowRef.t += 11_000;
+
+    await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message: 'הדלק מאוורר' });
+    expect(sends.some((m) => m === 'הפעולה נכשלה')).toBe(true);
+
+    const sendsBefore = sends.length;
+    await bridge.onStateChanged('switch.fan', 'on');
     expect(sends.slice(sendsBefore).some((m) => m === 'בוצע')).toBe(false);
   });
 });
@@ -609,7 +689,7 @@ describe('Item 8: per-entity completion deadlines for all-covers', () => {
       haRest: {
         ...noPositionPort,
         callCover: vi.fn(async () => ({ ok: true } as const)),
-        callLight: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: true } as const)),
       },
       signal: { send: vi.fn(async (_u, _n, msg) => { sends.push(msg); return true; }) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
@@ -730,7 +810,7 @@ describe('Fix 4 (MED): per-entity failure in all-covers command', () => {
           if (entityId === firstCoverId) return { ok: false, reason: 'failed' } as const;
           return { ok: true } as const;
         }),
-        callLight: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: true } as const)),
       },
       signal: { send: vi.fn(async (_u, _n, msg) => { sends.push(msg); return true; }) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
@@ -830,7 +910,7 @@ describe('Fix 6 (MED): new all-covers supersedes prior pending confirm without s
           haCalls.push({ entityId, verb });
           return { ok: true } as const;
         }),
-        callLight: vi.fn(async () => ({ ok: true } as const)),
+        callToggle: vi.fn(async () => ({ ok: true } as const)),
       },
       signal: { send: vi.fn(async (_u, _n, message) => { sends.push({ message }); return true; }) },
       clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
@@ -910,7 +990,7 @@ function presetHarness(currentPosition: number | undefined, nowRef = { t: 1_000_
         haCalls.push({ entityId, verb });
         return { ok: true } as const;
       }),
-      callLight: vi.fn(async (entityId: string, verb: string) => {
+      callToggle: vi.fn(async (_domain: string, entityId: string, verb: string) => {
         haCalls.push({ entityId, verb });
         return { ok: true } as const;
       }),
