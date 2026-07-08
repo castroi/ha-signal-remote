@@ -1,6 +1,6 @@
 # ha-signal-remote
 
-A small, hardened bridge that turns **Hebrew Signal messages into Home Assistant cover/light commands**.
+A small, hardened bridge that turns **Hebrew Signal messages into Home Assistant cover/light/switch commands**.
 
 Send `סגור סלון` ("close salon") to a dedicated Signal number and the living-room shutter closes — with a layer of safety controls (freshness, dedup, clock-health, WebSocket fail-closed, rate limiting, kill switch) so a stale, replayed, or spoofed message can never move a cover unexpectedly.
 
@@ -16,7 +16,7 @@ Signal user ──(Hebrew text)──► signal-cli-rest-api ──WS──► b
 ```
 
 - **Receives** messages over an outbound JSON-RPC WebSocket. In deployment the bridge connects only to its own per-bot [`signal-wrapper`](https://github.com/castroi/signal-wrapper) (a sender-binding proxy) using a bearer token; the wrapper pins the bot's number and forwards to the shared [`bbernhard/signal-cli-rest-api`](https://github.com/bbernhard/signal-cli-rest-api) container (`MODE=json-rpc`).
-- **Commands** Home Assistant over its REST API (`cover.open_cover` / `close_cover` / `stop_cover`, `light.turn_on` / `turn_off`).
+- **Commands** Home Assistant over its REST API (`cover.open_cover` / `close_cover` / `stop_cover`, `light.turn_on` / `turn_off`, `switch.turn_on` / `turn_off`).
 - **Tracks** completion by subscribing to HA `state_changed` over a second WebSocket.
 - **Replies** to the user over the signal-cli REST endpoint.
 
@@ -41,8 +41,8 @@ The pure core means most behavior is unit-testable without Signal or Home Assist
 | **Freshness gate** | A command older than 30s is refused with an ask-to-resend (stateless). |
 | **Future-timestamp guard** | A timestamp more than 10s in the future routes to the clock-unhealthy path, not a normal refusal. |
 | **Dedup cache** | Keyed on `(sourceUuid, timestamp, normalized command)`, 90s TTL — a redelivered Signal message acts once. |
-| **Clock health** | External time references checked every 60s; skew > 30s disables covers. If all references are unreachable, covers stay enabled within a 1h last-good grace, then fail safe. **Lights are never affected by clock state.** |
-| **WS fail-closed (covers)** | If the HA state WebSocket is down, cover commands are refused — no state tracking means no false acks. Covers re-enable only after the WS is continuously healthy for 10s (anti-flap debounce). **Lights stay operable.** |
+| **Clock health** | External time references checked every 60s; skew > 30s disables covers. If all references are unreachable, covers stay enabled within a 1h last-good grace, then fail safe. **Lights and switches are never affected by clock state.** |
+| **WS fail-closed (covers)** | If the HA state WebSocket is down, cover commands are refused — no state tracking means no false acks. Covers re-enable only after the WS is continuously healthy for 10s (anti-flap debounce). **Lights and switches stay operable.** |
 | **Rate limiting** | 5/30s per sender + 15/30s global. A valid `כן`/`לא` confirm bypasses the caps via a reserved lane (itself capped at 6/sender/min). |
 | **Kill switch** | Blocks all new commands (guaranteed) and best-effort issues `stop_cover` to every in-flight cover. Status/help still reply in safe mode. |
 | **Allowlist** | Identity is pinned on Signal `sourceUuid` (ACI), not phone number. Unknown senders are silently dropped (rate-limited log, no message body). |
@@ -110,6 +110,11 @@ entities:
     open_position: 80      # target for open_to (omit → full open)
     close_position: 30     # target for close_to (omit → full close)
     tolerance_percent: 5   # optional per-cover completion band
+  fan:
+    type: switch           # on/off toggle — same verbs as a light
+    entity_id: switch.fan
+    completion_timeout_ms: 5000
+    aliases: ["מאוורר"]
 
 scopes:
   all_covers:
@@ -134,11 +139,11 @@ that would reverse direction** (e.g. a `close_to 30` on a cover already at 20) �
 target for that direction falls back to full open/close.
 
 **Help text (`messages.help`).** The `עזרה` / `תפריט` reply is configurable in the same file
-under an optional `messages.help` block — edit it freely with no code change. The `{rooms}`
-and `{lights}` placeholders are filled at send time from the first alias of each configured
-cover / light entity, so the listed devices never drift from the table; a line whose
-placeholder resolves to empty (e.g. a deployment with no lights) is dropped. If `messages.help`
-is absent, a built-in default is used.
+under an optional `messages.help` block — edit it freely with no code change. The `{rooms}`,
+`{lights}` and `{switches}` placeholders are filled at send time from the first alias of each
+configured cover / light / switch entity, so the listed devices never drift from the table; a
+line whose placeholder resolves to empty (e.g. a deployment with no lights or no switches) is
+dropped. If `messages.help` is absent, a built-in default is used.
 
 ---
 
@@ -150,12 +155,13 @@ A message is `verb + entity`, e.g. `סגור סלון` (close salon) or `פתח 
 | --- | --- |
 | `פתח` / `סגור` | Full open (100) / full close (0) of a cover |
 | `העלה` / `הנמך` | Open / close a cover **to its configured preset position** (words are configurable) |
+| `הדלק` / `כבה` | Turn a light **or switch** on / off |
 | `תריסים` | All-covers scope — prompts a context-bound `כן`/`לא` confirmation (20s expiry) before acting |
 | `כן` / `לא` | Yes / No — confirm or cancel a pending all-covers action |
 | `סטטוס` | Status — always answered for authorized senders: WS / clock / kill-switch / covers-enabled state |
 | `עזרה`, `תפריט` | Help / menu |
 
-Cover feedback is two-stage (`מבצע…` then completion); lights are single-stage. A command that exceeds its per-entity `completion_timeout_ms` returns a timeout + manual-check reply — never a false success. Sending a new command for a cover already in motion preempts it (stop, then the new direction).
+Cover feedback is two-stage (`מבצע…` then completion); lights and switches are single-stage. A command that exceeds its per-entity `completion_timeout_ms` returns a timeout + manual-check reply — never a false success. Sending a new command for a cover already in motion preempts it (stop, then the new direction).
 
 ---
 
