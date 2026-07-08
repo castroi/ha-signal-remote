@@ -98,6 +98,16 @@ describe('alias table loading', () => {
     expect(table.positionScripts?.close).toBe('script.covers_down');
     expect(table.positionScripts?.defaultTolerancePercent).toBe(3);
   });
+
+  it('loads switch entities (issue #25)', () => {
+    const table = loadAliasTable(exampleAliases);
+    expect(table.entities.get('switch.fan')?.type).toBe('switch');
+    expect(table.entities.get('switch.garden_socket')?.type).toBe('switch');
+    expect(table.resolveEntity('מאוורר')?.entityId).toBe('switch.fan');
+    expect(table.resolveEntity('שקע')?.entityId).toBe('switch.garden_socket');
+    // switches never join the all-covers scope
+    expect(table.coverEntityIds()).not.toContain('switch.fan');
+  });
 });
 
 describe('help text (issue #21)', () => {
@@ -110,6 +120,12 @@ describe('help text (issue #21)', () => {
   });
   const light = (aliases: string[], entity_id: string) => ({
     type: 'light',
+    entity_id,
+    completion_timeout_ms: 5_000,
+    aliases,
+  });
+  const sw = (aliases: string[], entity_id: string) => ({
+    type: 'switch',
     entity_id,
     completion_timeout_ms: 5_000,
     aliases,
@@ -148,6 +164,24 @@ describe('help text (issue #21)', () => {
       '🪟 תריסים\nחדרים: {rooms}\nאורות: {lights}\nℹ️ סטטוס',
     );
     expect(table.helpText()).toBe('🪟 תריסים\nחדרים: סלון\nℹ️ סטטוס');
+  });
+
+  it('fills {switches} from switch entities and drops the line when none exist (issue #25)', () => {
+    const withSwitches = make(
+      {
+        garden: light(['גינה'], 'light.garden'),
+        fan: sw(['מאוורר'], 'switch.fan'),
+        socket: sw(['שקע'], 'switch.garden_socket'),
+      },
+      'אורות: {lights}\nמתגים: {switches}',
+    );
+    expect(withSwitches.helpText()).toBe('אורות: גינה\nמתגים: מאוורר · שקע');
+
+    const noSwitches = make(
+      { garden: light(['גינה'], 'light.garden') },
+      'אורות: {lights}\nמתגים: {switches}\nℹ️ סטטוס',
+    );
+    expect(noSwitches.helpText()).toBe('אורות: גינה\nℹ️ סטטוס');
   });
 
   it('falls back to the built-in default when messages.help is absent', () => {

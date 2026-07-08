@@ -53,7 +53,7 @@ export const RESERVED_WORDS: ReadonlySet<string> = new Set([
   'תריסים',
 ]);
 
-export type EntityType = 'cover' | 'light';
+export type EntityType = 'cover' | 'light' | 'switch';
 export type Verb = 'open' | 'close' | 'stop' | 'on' | 'off' | 'open_to' | 'close_to';
 
 export interface EntityDef {
@@ -74,9 +74,10 @@ export interface EntityDef {
 export const DEFAULT_TOLERANCE_PERCENT = 3;
 
 /**
- * Fallback help/menu text when the alias table has no `messages.help`. `{rooms}`
- * and `{lights}` are filled at render time from the configured entities so the
- * device list never drifts; a line whose placeholder resolves to empty is dropped.
+ * Fallback help/menu text when the alias table has no `messages.help`. `{rooms}`,
+ * `{lights}` and `{switches}` are filled at render time from the configured
+ * entities so the device list never drifts; a line whose placeholder resolves to
+ * empty is dropped.
  */
 export const DEFAULT_HELP_TEMPLATE = [
   '🪟 תריסים — "פתח" / "סגור" / "עצור" + חדר',
@@ -86,6 +87,9 @@ export const DEFAULT_HELP_TEMPLATE = [
   '',
   '💡 אורות — "הדלק" / "כבה" + שם',
   'אורות: {lights}',
+  '',
+  '🔌 מתגים — "הדלק" / "כבה" + שם',
+  'מתגים: {switches}',
   '',
   '🏠 כל התריסים — שלח "תריסים", ואז כן / לא',
   'ℹ️ מצב המערכת — שלח "סטטוס"',
@@ -206,21 +210,21 @@ export class AliasTable {
 
   /**
    * Renders the configured help/menu text (item: configurable help, issue #21).
-   * Fills `{rooms}` / `{lights}` with the display names (first alias) of the
-   * configured cover / light entities in config order, and drops any line whose
-   * placeholder resolves to empty so there is no dangling label or blank gap.
+   * Fills `{rooms}` / `{lights}` / `{switches}` with the display names (first
+   * alias) of the configured cover / light / switch entities in config order, and
+   * drops any line whose placeholder resolves to empty so there is no dangling
+   * label or blank gap.
    */
   helpText(): string {
-    const rooms = this.displayNames('cover').join(' · ');
-    const lights = this.displayNames('light').join(' · ');
+    const fills: ReadonlyArray<[placeholder: string, value: string]> = [
+      ['{rooms}', this.displayNames('cover').join(' · ')],
+      ['{lights}', this.displayNames('light').join(' · ')],
+      ['{switches}', this.displayNames('switch').join(' · ')],
+    ];
     return this.helpTemplate
       .split('\n')
-      .filter(
-        (line) =>
-          !(line.includes('{rooms}') && rooms === '') &&
-          !(line.includes('{lights}') && lights === ''),
-      )
-      .map((line) => line.split('{rooms}').join(rooms).split('{lights}').join(lights))
+      .filter((line) => !fills.some(([ph, value]) => line.includes(ph) && value === ''))
+      .map((line) => fills.reduce((l, [ph, value]) => l.split(ph).join(value), line))
       .join('\n');
   }
 
