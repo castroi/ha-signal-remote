@@ -52,6 +52,16 @@ entities:
     entity_id: light.garden
     completion_timeout_ms: 5000
     aliases: ["גינה"]
+  fan:
+    type: switch
+    entity_id: switch.fan
+    completion_timeout_ms: 5000
+    aliases: ["מאוורר"]
+  garden_socket:
+    type: switch
+    entity_id: switch.garden_socket
+    completion_timeout_ms: 5000
+    aliases: ["שקע"]
 
 scopes:
   all_covers:
@@ -69,9 +79,10 @@ position_scripts:
   default_tolerance_percent: 3
 
 # User-facing reply text. Edit freely — no code change needed.
-# In `help`, {rooms} and {lights} are auto-filled from the entities above
-# (the first alias of each), so the device list never drifts when you add a
-# device. A line whose placeholder resolves to empty is dropped (e.g. no lights).
+# In `help`, {rooms}, {lights} and {switches} are auto-filled from the entities
+# above (the first alias of each), so the device list never drifts when you add
+# a device. A line whose placeholder resolves to empty is dropped (e.g. no
+# lights or no switches).
 messages:
   help: |
     🪟 תריסים
@@ -84,6 +95,10 @@ messages:
     💡 אורות
     "הדלק גינה" / "כבה גינה"
     אורות: {lights}
+
+    🔌 מתגים
+    "הדלק מאוורר" / "כבה שקע"
+    מתגים: {switches}
 
     🏠 כל התריסים
     שלח "תריסים", ואז כן / לא

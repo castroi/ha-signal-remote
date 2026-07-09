@@ -44,19 +44,24 @@ describe('HaRestClient (design §7, §6 A02/A03)', () => {
     ]);
   });
 
-  it('maps light verbs to turn_on / turn_off', async () => {
-    const calls: string[] = [];
-    const fetchImpl = mockFetch((url) => {
-      calls.push(url);
+  it('maps toggle verbs to turn_on / turn_off in the given domain (issue #25)', async () => {
+    const calls: { url: string; body: unknown }[] = [];
+    const fetchImpl = mockFetch((url, init) => {
+      calls.push({ url, body: JSON.parse(init.body as string) });
       return new Response('[]', { status: 200 });
     });
     const client = new HaRestClient({ ...baseOpts, fetchImpl });
-    await client.callLight('light.garden', 'on');
-    await client.callLight('light.garden', 'off');
-    expect(calls).toEqual([
+    await client.callToggle('light', 'light.garden', 'on');
+    await client.callToggle('light', 'light.garden', 'off');
+    await client.callToggle('switch', 'switch.fan', 'on');
+    await client.callToggle('switch', 'switch.fan', 'off');
+    expect(calls.map((c) => c.url)).toEqual([
       'http://localhost:8123/api/services/light/turn_on',
       'http://localhost:8123/api/services/light/turn_off',
+      'http://localhost:8123/api/services/switch/turn_on',
+      'http://localhost:8123/api/services/switch/turn_off',
     ]);
+    expect(calls[2]?.body).toEqual({ entity_id: 'switch.fan' });
   });
 
   it('sends the bearer token in the Authorization header', async () => {

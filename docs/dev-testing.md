@@ -15,7 +15,8 @@ Stack (`docker-compose.dev.yml`):
 
 Simulated entities: `cover.living_room`, `cover.kitchen`, `cover.kids_room`,
 `cover.parents_room` (6–8s travel, real `opening`/`closing` → `open`/`closed`
-transitions) and `light.garden`. Covers never report `stopped` (HA never does),
+transitions), `light.garden`, and the switches `switch.fan` / `switch.garden_socket`
+(instant `on`/`off`, single-stage). Covers never report `stopped` (HA never does),
 so `stop` completion is the one behaviour that still needs real hardware (§7).
 
 ## One-time setup
@@ -58,6 +59,12 @@ curl -s -XPOST 127.0.0.1:8099/reset
 curl -s -XPOST 127.0.0.1:8099/inject -d '{"sourceUuid":"dev-uuid-1","message":"פתח סלון"}'
 sleep 8 && curl -s 127.0.0.1:8099/sent | jq -r '.[].message'
 # → מבצע…   then   בוצע
+
+# turn a switch on — single-stage, one reply (issue #25)
+curl -s -XPOST 127.0.0.1:8099/reset
+curl -s -XPOST 127.0.0.1:8099/inject -d '{"sourceUuid":"dev-uuid-1","message":"הדלק מאוורר"}'
+sleep 2 && curl -s 127.0.0.1:8099/sent | jq -r '.[].message'
+# → בוצע   (no מבצע… progress ack)
 ```
 
 Watch a cover's state directly:

@@ -7,10 +7,11 @@
  * never produces a false success ack.
  */
 
-// CoverVerb and LightVerb are the canonical declarations in state-machine.ts;
-// import and re-export from there to keep a single definition (item 11).
-import type { CoverVerb, LightVerb } from '../core/state-machine.js';
-export type { CoverVerb, LightVerb };
+// CoverVerb, ToggleVerb and ToggleDomain are the canonical declarations in
+// state-machine.ts; import and re-export from there to keep a single definition
+// (item 11).
+import type { CoverVerb, ToggleDomain, ToggleVerb } from '../core/state-machine.js';
+export type { CoverVerb, ToggleDomain, ToggleVerb };
 
 export type HaCallResult = { ok: true } | { ok: false; reason: 'failed' };
 
@@ -20,7 +21,7 @@ const COVER_SERVICE: Record<CoverVerb, string> = {
   stop: 'stop_cover',
 };
 
-const LIGHT_SERVICE: Record<LightVerb, string> = {
+const TOGGLE_SERVICE: Record<ToggleVerb, string> = {
   on: 'turn_on',
   off: 'turn_off',
 };
@@ -50,8 +51,9 @@ export class HaRestClient {
     return this.callService('cover', COVER_SERVICE[verb], entityId);
   }
 
-  callLight(entityId: string, verb: LightVerb): Promise<HaCallResult> {
-    return this.callService('light', LIGHT_SERVICE[verb], entityId);
+  /** turn_on / turn_off for the single-stage toggle domains (light, switch). */
+  callToggle(domain: ToggleDomain, entityId: string, verb: ToggleVerb): Promise<HaCallResult> {
+    return this.callService(domain, TOGGLE_SERVICE[verb], entityId);
   }
 
   /**

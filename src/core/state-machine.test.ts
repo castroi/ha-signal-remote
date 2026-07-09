@@ -3,6 +3,7 @@ import { CommandStateMachine, type Effect } from './state-machine.js';
 
 const COVER = { entityId: 'cover.living_room', type: 'cover' as const, completionTimeoutMs: 30_000 };
 const LIGHT = { entityId: 'light.garden', type: 'light' as const, completionTimeoutMs: 5_000 };
+const SWITCH = { entityId: 'switch.fan', type: 'switch' as const, completionTimeoutMs: 5_000 };
 
 function machine(now = { t: 0 }) {
   return new CommandStateMachine({ now: () => now.t, decisionWindowMs: 30_000, confirmExpiryMs: 20_000 });
@@ -16,12 +17,47 @@ describe('CommandStateMachine (design §5)', () => {
   it('a light command issues immediately, single-stage ack on observed target', () => {
     const sm = machine();
     const start = sm.submit({ commandId: 'c1', sourceUuid: 'u1', verb: 'on', entity: LIGHT });
-    expect(effectKinds(start)).toContain('issue-light');
+    expect(start).toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: 'issue-toggle', domain: 'light' })]),
+    );
+    // Single-stage: no progress ack for a toggle.
+    expect(effectKinds(start)).not.toContain('reply-progress');
     expect(sm.stateOf('c1')).toBe('issued');
 
     const done = sm.observeState(LIGHT.entityId, 'on');
     expect(sm.stateOf('c1')).toBe('observed_target');
     expect(effectKinds(done)).toContain('reply-success');
+  });
+
+  it('a switch command rides the toggle path with domain switch (issue #25)', () => {
+    const sm = machine();
+    const start = sm.submit({ commandId: 'sw1', sourceUuid: 'u1', verb: 'off', entity: SWITCH });
+    expect(start).toEqual([
+      {
+        kind: 'issue-toggle',
+        commandId: 'sw1',
+        entityId: SWITCH.entityId,
+        domain: 'switch',
+        verb: 'off',
+      },
+    ]);
+    expect(sm.stateOf('sw1')).toBe('issued');
+
+    // Wrong state does not complete; the verb's target state does.
+    expect(sm.observeState(SWITCH.entityId, 'on')).toEqual([]);
+    const done = sm.observeState(SWITCH.entityId, 'off');
+    expect(sm.stateOf('sw1')).toBe('observed_target');
+    expect(effectKinds(done)).toContain('reply-success');
+  });
+
+  it('a switch command times out honestly like a light (no false ack)', () => {
+    const now = { t: 0 };
+    const sm = machine(now);
+    sm.submit({ commandId: 'sw2', sourceUuid: 'u1', verb: 'on', entity: SWITCH });
+    now.t = SWITCH.completionTimeoutMs + 1;
+    const fired = sm.tick();
+    expect(sm.stateOf('sw2')).toBe('timeout');
+    expect(effectKinds(fired)).toContain('reply-timeout');
   });
 
   it('a cover command gives two-stage feedback: ack-on-receipt then ack-on-completion', () => {

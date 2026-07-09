@@ -1,7 +1,7 @@
 # Home Assistant DEV configuration for testing the home-control bridge.
 #
-# Provides the five entities the alias table expects — four simulated roller
-# covers and a garden light — with NO real Shelly hardware. The covers report
+# Provides the seven entities the alias table expects — four simulated roller
+# covers, a garden light and two switches — with NO real Shelly hardware. The covers report
 # real `opening`/`closing` → `open`/`closed` transitions over a short travel
 # time, so the bridge's two-stage feedback, completion timeouts, preemption and
 # fail-closed paths all exercise against genuine state_changed events on the HA
@@ -34,11 +34,15 @@ input_select:
 input_boolean:
   garden_light:
     name: Garden Light
+  fan:
+    name: Fan Backing
+  garden_socket:
+    name: Garden Socket Backing
 
 # Modern template integration (HA migrated cover/light template here from the
 # legacy `cover:`/`light:` platform style). Names slugify to the entity_ids the
 # alias table expects: cover.living_room, cover.kitchen, cover.kids_room,
-# cover.parents_room, light.garden.
+# cover.parents_room, light.garden, switch.fan, switch.garden_socket.
 template:
   - cover:
       - name: Living Room
@@ -111,6 +115,25 @@ template:
         turn_off:
           - action: input_boolean.turn_off
             target: { entity_id: input_boolean.garden_light }
+  - switch:
+      - name: Fan
+        unique_id: sim_fan
+        state: "{{ is_state('input_boolean.fan', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target: { entity_id: input_boolean.fan }
+        turn_off:
+          - action: input_boolean.turn_off
+            target: { entity_id: input_boolean.fan }
+      - name: Garden Socket
+        unique_id: sim_garden_socket
+        state: "{{ is_state('input_boolean.garden_socket', 'on') }}"
+        turn_on:
+          - action: input_boolean.turn_on
+            target: { entity_id: input_boolean.garden_socket }
+        turn_off:
+          - action: input_boolean.turn_off
+            target: { entity_id: input_boolean.garden_socket }
 
 # One automation per cover finishes the travel. mode: restart so a reversing
 # command (preemption) cancels the in-flight travel; the post-delay guard means a
