@@ -10,7 +10,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { composeAndStart } from './compose.js';
+import { composeAndStart, parseClockReferenceBody } from './compose.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const aliasPath = resolve(here, '../../config/aliases.example.yaml');
@@ -166,6 +166,50 @@ describe('Fix 2 (HIGH): CLOCK_REFERENCES env var', () => {
     delete envWithout['CLOCK_REFERENCES'];
     const handle = composeAndStart({ aliasPath, env: envWithout });
     expect(() => handle.shutdown()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Clock-reference body parsing (Cloudflare trace + JSON unixtime)
+// ---------------------------------------------------------------------------
+
+describe('parseClockReferenceBody', () => {
+  it('parses a Cloudflare-trace body via its ts= line', () => {
+    const body = 'fl=123abc\nh=www.cloudflare.com\nts=1783689884.471\nvisit_scheme=https';
+    expect(parseClockReferenceBody(body)).toBe(1783689884471);
+  });
+
+  it('parses a JSON body with unixtime in seconds', () => {
+    expect(parseClockReferenceBody('{"unixtime":1783689884}')).toBe(1783689884000);
+  });
+
+  it('tolerates CRLF line endings in a trace body (proxy rewrite must not read as unreachable)', () => {
+    expect(parseClockReferenceBody('h=example.com\r\nts=1783689884\r\nvisit_scheme=https\r\n')).toBe(
+      1783689884000,
+    );
+  });
+
+  it('reports missing unixtime (not "neither") for valid JSON that is null or a primitive', () => {
+    expect(() => parseClockReferenceBody('null')).toThrow(/missing unixtime/);
+    expect(() => parseClockReferenceBody('123')).toThrow(/missing unixtime/);
+  });
+
+  it('rejects JSON without a numeric unixtime (the old timeapi.io default could never work)', () => {
+    const timeapiBody =
+      '{"year":2026,"month":7,"day":10,"hour":13,"minute":21,"seconds":4,"dateTime":"2026-07-10T13:21:04"}';
+    expect(() => parseClockReferenceBody(timeapiBody)).toThrow(/missing unixtime/);
+  });
+
+  it('rejects a body that is neither a ts= line nor JSON', () => {
+    expect(() => parseClockReferenceBody('<html>gateway error</html>')).toThrow(/neither/);
+  });
+
+  it('rejects samples before 2024 (malformed-but-numeric bodies cannot set skew)', () => {
+    expect(() => parseClockReferenceBody('{"unixtime":1000000}')).toThrow(/out of range/);
+  });
+
+  it('rejects unixtime given in milliseconds (would otherwise read as astronomical skew)', () => {
+    expect(() => parseClockReferenceBody('{"unixtime":1783689884471}')).toThrow(/out of range/);
   });
 });
 
