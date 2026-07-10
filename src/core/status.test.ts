@@ -39,6 +39,19 @@ describe('status command (design §4)', () => {
     expect(s.coversReason).toBe('clock-skew');
   });
 
+  it('carries the distinct clock-offline and clock-future reasons through to the message', () => {
+    for (const reason of ['clock-offline', 'clock-future'] as const) {
+      const s = buildStatus({
+        ...healthy,
+        clockHealthy: false,
+        coversEnabled: false,
+        coversDisabledReason: reason,
+      });
+      expect(s.coversReason).toBe(reason);
+      expect(formatStatus(s)).toContain(reason);
+    }
+  });
+
   it('reflects an engaged kill switch', () => {
     const s = buildStatus({ ...healthy, killEngaged: true });
     expect(s.killSwitch).toBe('on');

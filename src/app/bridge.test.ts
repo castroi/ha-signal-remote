@@ -1006,6 +1006,26 @@ describe('Fix 8 (LOW): future-timestamp latch gates subsequent cover commands', 
     await h.bridge.handleEnvelope(envelope('סגור את הסלון', h.nowRef));
     expect(h.haCalls).toContainEqual({ entityId: 'cover.living_room', verb: 'close' });
   });
+
+  it('סטטוס reports clock-future while latched, not clock-skew', async () => {
+    const clockRef = { lastGoodCheckAt: 1_000_000 };
+    const h = harness({ t: 1_000_000 }, clockRef);
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope({
+      sourceUuid: 'u1',
+      sourceNumber: '+1999',
+      timestamp: h.nowRef.t + 20_000,
+      message: 'סגור את הסלון',
+    });
+
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+    const status = h.sends.at(-1)!.message;
+    expect(status).toContain('clock-future');
+    expect(status).not.toContain('clock-skew');
+  });
 });
 
 // ---------------------------------------------------------------------------

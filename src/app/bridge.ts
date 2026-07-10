@@ -3,7 +3,7 @@ import { DEFAULT_TOLERANCE_PERCENT } from './config.js';
 import { normalize } from '../core/normalize.js';
 import { DedupCache } from '../core/dedup.js';
 import { checkFreshness } from '../core/freshness.js';
-import { evaluateClockHealth } from '../core/clock-health.js';
+import { evaluateClockHealth, type ClockUnhealthyReason } from '../core/clock-health.js';
 import { RateLimiter } from '../core/rate-limit.js';
 import { parseCommand } from '../core/parse.js';
 import {
@@ -833,7 +833,7 @@ export class Bridge {
     const clock = this.clockHealth();
     let reason: CoversDisabledReason | undefined;
     if (!this.wsGate.coversEnabled()) reason = 'ws-down';
-    else if (!clock.coversEnabled) reason = 'clock-skew';
+    else if (clock.status === 'unhealthy') reason = CLOCK_REASON_LABEL[clock.reason];
     return formatStatus(
       buildStatus({
         wsHealthy: this.wsGate.coversEnabled(),
@@ -855,6 +855,13 @@ export class Bridge {
     await this.signal.send(env.sourceUuid, env.sourceNumber ?? '', message);
   }
 }
+
+/** Status label per clock-unhealthy cause, so סטטוס reports the real reason. */
+const CLOCK_REASON_LABEL: Record<ClockUnhealthyReason, CoversDisabledReason> = {
+  skew: 'clock-skew',
+  'future-timestamp': 'clock-future',
+  'offline-grace-expired': 'clock-offline',
+};
 
 function toRef(entity: EntityDef, target?: PositionTarget): EntityRef {
   const base = {
