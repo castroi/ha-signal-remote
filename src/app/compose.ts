@@ -57,9 +57,11 @@ export function composeAndStart(opts: ComposeOptions): RuntimeHandle {
   //
   // §5 requires an ordered list of clock references (primary + fallbacks) in
   // config, not hard-coded. CLOCK_REFERENCES is a comma-separated list of URLs
-  // (env-driven). Each URL must serve a JSON body with a numeric `unixtime`
-  // field (seconds since epoch). The default list uses worldtimeapi.org as the
-  // primary with a fallback to timeapi.io.
+  // (env-driven). Each URL must serve either a JSON body with a numeric
+  // `unixtime` field (seconds since epoch) or a Cloudflare-trace-style text
+  // body containing a `ts=<epoch seconds>` line (see parseClockReferenceBody).
+  // The default list uses Cloudflare's per-request-generated trace endpoint as
+  // the primary with a fallback to worldtimeapi.org.
   //
   // "Unreachable" means ALL configured references failed within the check
   // timeout. If ANY reference answers, its skew sample is used.
@@ -81,12 +83,13 @@ export function composeAndStart(opts: ComposeOptions): RuntimeHandle {
   };
 
   // Default list documented here; operators override via CLOCK_REFERENCES env var.
+  // (The previous timeapi.io fallback is gone: that endpoint has no `unixtime`
+  // field, so it could never produce a sample — and its server clock has been
+  // observed significantly off, which reads as skew and disables covers.)
   const DEFAULT_CLOCK_REFERENCES = [
+    'https://www.cloudflare.com/cdn-cgi/trace',
     'https://worldtimeapi.org/api/ip',
-    'https://timeapi.io/api/time/current/zone?timeZone=UTC',
   ].join(',');
-
-  const MIN_VALID_YEAR_EPOCH_MS = new Date('2024-01-01T00:00:00Z').getTime();
 
   const clockReferenceUrls = (
     (opts.env ?? process.env)['CLOCK_REFERENCES'] ?? DEFAULT_CLOCK_REFERENCES
@@ -103,15 +106,7 @@ export function composeAndStart(opts: ComposeOptions): RuntimeHandle {
     references: clockReferenceUrls.map((url) => async (signal: AbortSignal) => {
       const res = await fetch(url, { signal });
       if (!res.ok) throw new Error(`clock ref HTTP ${res.status}`);
-      const body = (await res.json()) as { unixtime?: number; [k: string]: unknown };
-      if (typeof body.unixtime !== 'number') throw new Error('clock ref bad body: missing unixtime');
-      const epochMs = body.unixtime * 1000;
-      // Reject obviously-bad samples (year < 2024) so a malformed-but-numeric
-      // body cannot silently set skew to an arbitrary value (fix item 2).
-      if (epochMs < MIN_VALID_YEAR_EPOCH_MS) {
-        throw new Error(`clock ref bad sample: year before 2024 (${new Date(epochMs).getUTCFullYear()})`);
-      }
-      return epochMs;
+      return parseClockReferenceBody(await res.text());
     }),
     checkTimeoutMs: 5_000,
   });
@@ -350,6 +345,44 @@ export function composeAndStart(opts: ComposeOptions): RuntimeHandle {
       }
     },
   };
+}
+
+const MIN_VALID_YEAR_EPOCH_MS = new Date('2024-01-01T00:00:00Z').getTime();
+const MAX_VALID_YEAR_EPOCH_MS = new Date('2100-01-01T00:00:00Z').getTime();
+
+/**
+ * Parse a clock-reference response body into epoch ms. Two formats:
+ * - Cloudflare-trace-style text: a `ts=<epoch seconds, optional fraction>` line
+ *   (https://www.cloudflare.com/cdn-cgi/trace — generated per request, never cached).
+ * - JSON with a numeric `unixtime` field in seconds (worldtimeapi.org, the time-shim).
+ *
+ * Samples outside [2024, 2100) are rejected as malformed, so a numeric-but-wrong
+ * body cannot silently set skew to an arbitrary value (fix item 2); the upper
+ * bound also catches a reference that serves milliseconds where seconds are
+ * expected, which would otherwise read as an astronomical skew.
+ */
+export function parseClockReferenceBody(text: string): number {
+  let epochMs: number;
+  // \r? so a proxy that rewrites the body to CRLF cannot turn a healthy
+  // reference into "unreachable" (which would disable covers after the grace).
+  const ts = /^ts=(\d+(?:\.\d+)?)\r?$/m.exec(text);
+  if (ts) {
+    epochMs = Number(ts[1]) * 1000;
+  } else {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error('clock ref bad body: neither ts= line nor JSON');
+    }
+    const unixtime = (parsed as { unixtime?: unknown } | null)?.unixtime;
+    if (typeof unixtime !== 'number') throw new Error('clock ref bad body: missing unixtime');
+    epochMs = unixtime * 1000;
+  }
+  if (epochMs < MIN_VALID_YEAR_EPOCH_MS || epochMs >= MAX_VALID_YEAR_EPOCH_MS) {
+    throw new Error(`clock ref bad sample: year out of range (${new Date(epochMs).getUTCFullYear()})`);
+  }
+  return epochMs;
 }
 
 /**

@@ -7,7 +7,12 @@
  * enabled/disabled with the reason when disabled.
  */
 
-export type CoversDisabledReason = 'ws-down' | 'clock-skew' | 'clock-offline' | 'kill-switch';
+export type CoversDisabledReason =
+  | 'ws-down'
+  | 'clock-skew'
+  | 'clock-offline'
+  | 'clock-future'
+  | 'kill-switch';
 
 export interface StatusInputs {
   readonly wsHealthy: boolean;

@@ -29,7 +29,9 @@ const noPositionPort = {
   callPositionScript: async () => ({ ok: true }) as const,
 };
 
-function harness(nowRef = { t: 1_000_000 }) {
+// clockRef lets a test pin lastGoodCheckAt (default: tracks now, i.e. a good
+// reference check "just happened" — the healthy steady state).
+function harness(nowRef = { t: 1_000_000 }, clockRef?: { lastGoodCheckAt: number }) {
   const sends: { message: string }[] = [];
   const haCalls: { entityId: string; verb: string; domain?: string }[] = [];
   const notices: string[] = [];
@@ -56,7 +58,11 @@ function harness(nowRef = { t: 1_000_000 }) {
       }),
     },
     clock: {
-      snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }),
+      snapshot: () => ({
+        skewSampleMs: 0,
+        lastGoodCheckAt: clockRef?.lastGoodCheckAt ?? nowRef.t,
+        allReferencesUnreachable: false,
+      }),
     },
   });
 
@@ -950,7 +956,10 @@ describe('Fix 6 (MED): new all-covers supersedes prior pending confirm without s
 
 describe('Fix 8 (LOW): future-timestamp latch gates subsequent cover commands', () => {
   it('after a future-timestamp envelope is detected, coversEnabled() stays false for subsequent commands', async () => {
-    const h = harness();
+    // Pin the last good reference check before the latch: the reference has not
+    // yet vouched for the local clock, so the latch must hold.
+    const clockRef = { lastGoodCheckAt: 1_000_000 };
+    const h = harness({ t: 1_000_000 }, clockRef);
     h.bridge.onWsConnected();
     h.nowRef.t += 11_000;
 
@@ -968,6 +977,54 @@ describe('Fix 8 (LOW): future-timestamp latch gates subsequent cover commands', 
     await h.bridge.handleEnvelope(envelope('סגור את הסלון', h.nowRef));
     expect(h.haCalls.filter((c) => c.entityId === 'cover.living_room')).toHaveLength(0);
     expect(h.sends.some((s) => s.message.includes('שעון'))).toBe(true);
+  });
+
+  it('releases the latch once a good reference check lands after it was set', async () => {
+    const clockRef = { lastGoodCheckAt: 1_000_000 };
+    const h = harness({ t: 1_000_000 }, clockRef);
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    // Latch via a future-dated envelope (a fast sender clock).
+    await h.bridge.handleEnvelope({
+      sourceUuid: 'u1',
+      sourceNumber: '+1999',
+      timestamp: h.nowRef.t + 20_000,
+      message: 'סגור את הסלון',
+    });
+
+    // Still latched: no good check since the latch.
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('סגור את הסלון', h.nowRef));
+    expect(h.haCalls).toHaveLength(0);
+
+    // The 60s reference check succeeds with zero skew: the reference vouches
+    // for the local clock, so covers must re-enable without a restart.
+    h.nowRef.t += 60_000;
+    clockRef.lastGoodCheckAt = h.nowRef.t;
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('סגור את הסלון', h.nowRef));
+    expect(h.haCalls).toContainEqual({ entityId: 'cover.living_room', verb: 'close' });
+  });
+
+  it('סטטוס reports clock-future while latched, not clock-skew', async () => {
+    const clockRef = { lastGoodCheckAt: 1_000_000 };
+    const h = harness({ t: 1_000_000 }, clockRef);
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope({
+      sourceUuid: 'u1',
+      sourceNumber: '+1999',
+      timestamp: h.nowRef.t + 20_000,
+      message: 'סגור את הסלון',
+    });
+
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+    const status = h.sends.at(-1)!.message;
+    expect(status).toContain('clock-future');
+    expect(status).not.toContain('clock-skew');
   });
 });
 

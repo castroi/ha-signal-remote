@@ -78,7 +78,7 @@ cp .env.example .env
 | `ALLOWLIST_UUIDS` | ✓ | Comma-separated authorized sender ACI UUIDs (at least one) |
 | `AUDIT_SALT` | ✓ | Salt for the audit-log UUID hash — generate with `openssl rand -hex 32` |
 | `SIGNAL_BACKEND_URL` | | Deployment only — the shared signal-cli's URL for the wrapper's `BACKEND_URL` (default `http://signal-api:8080`) |
-| `CLOCK_REFERENCES` | | Comma-separated time-reference URLs (defaults to worldtimeapi.org + timeapi.io) |
+| `CLOCK_REFERENCES` | | Comma-separated time-reference URLs; each must serve either a `ts=<epoch seconds>` line (Cloudflare `/cdn-cgi/trace` style) or JSON with `unixtime` in seconds (defaults to Cloudflare trace + worldtimeapi.org) |
 | `ALIAS_PATH` | | Path to the alias table (default `/app/config/aliases.yaml`) |
 
 The bridge **fails fast on startup** if any required variable is missing, naming the missing key.
