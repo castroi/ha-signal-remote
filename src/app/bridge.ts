@@ -111,12 +111,14 @@ export class Bridge {
   /**
    * Fix item 8 (LOW): latch the most-recently-detected future-timestamp delta
    * so the periodic cover gate reflects it consistently. Set whenever
-   * freshness returns 'clock-unhealthy'; cleared (undefined) once the skew
-   * sample from the reference supersedes it. The clockHealth() method threads
-   * this into evaluateClockHealth so coversEnabled() is consistent with the
-   * per-envelope path.
+   * freshness returns 'clock-unhealthy'; cleared by clockHealth() once a good
+   * reference check lands after `at` (the reference then vouches for the local
+   * clock — a fast *sender* clock is still refused per-envelope by the
+   * freshness gate, but must not keep covers globally disabled). The
+   * clockHealth() method threads the delta into evaluateClockHealth so
+   * coversEnabled() is consistent with the per-envelope path.
    */
-  private latchedFutureEnvelopeMs: number | undefined = undefined;
+  private latchedFutureEnvelope: { deltaMs: number; at: number } | undefined = undefined;
   /** Maps commandId -> the sender to reply to, for state-machine effect routing. */
   private readonly replyTo = new Map<string, { uuid: string; number: string }>();
   /**
@@ -152,7 +154,7 @@ export class Bridge {
     });
     this.replyTo.clear();
     this.pendingConfirm.clear();
-    this.latchedFutureEnvelopeMs = undefined;
+    this.latchedFutureEnvelope = undefined;
     this.reinitialized = false;
   }
 
@@ -280,7 +282,7 @@ export class Bridge {
       // coversEnabled() gate also reflects this clock disagreement consistently.
       const futureDeltaMs = env.timestamp - this.now();
       if (futureDeltaMs > 0) {
-        this.latchedFutureEnvelopeMs = futureDeltaMs;
+        this.latchedFutureEnvelope = { deltaMs: futureDeltaMs, at: this.now() };
       }
       await this.reply(env, REPLY.coversDisabledClock);
       this.audit?.log({
@@ -778,19 +780,25 @@ export class Bridge {
    * when available (item 2 / fix item 8). Called from `coversEnabled()` for the
    * ongoing gate and also for `statusMessage()`.
    *
-   * Fix item 8 (LOW): `latchedFutureEnvelopeMs` is threaded in so that a
+   * Fix item 8 (LOW): `latchedFutureEnvelope` is threaded in so that a
    * future-timestamp detection (per-envelope path) is reflected consistently in
    * the ongoing coversEnabled() evaluation — matching NTP-skew semantics.
+   * The latch is released once a good reference check lands after it was set:
+   * the reference has then vouched for the local clock, so the disagreement was
+   * the sender's clock, which the freshness gate keeps refusing per-envelope.
    * A caller can pass an explicit futureEnvelopeMs to override the latch.
    */
   private clockHealth(futureEnvelopeMs?: number) {
     const snap = this.clock.snapshot();
+    if (this.latchedFutureEnvelope && snap.lastGoodCheckAt > this.latchedFutureEnvelope.at) {
+      this.latchedFutureEnvelope = undefined;
+    }
     return evaluateClockHealth({
       now: this.now(),
       skewSampleMs: snap.skewSampleMs,
       lastGoodCheckAt: snap.lastGoodCheckAt,
       allReferencesUnreachable: snap.allReferencesUnreachable,
-      futureEnvelopeMs: futureEnvelopeMs ?? this.latchedFutureEnvelopeMs,
+      futureEnvelopeMs: futureEnvelopeMs ?? this.latchedFutureEnvelope?.deltaMs,
       tunables: this.cfg.tunables,
     });
   }
