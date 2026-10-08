@@ -124,6 +124,7 @@ scopes:
     expands_to_type: cover
   all_toggles:             # optional: enables "כבה הכל" / "הדלק הכל"
     word: "הכל"
+    min_interval_s: 10     # optional: min time between two confirmed actions (0 = off)
 
 # The HA scripts the bridge calls to drive covers to a preset position.
 position_scripts:
@@ -146,8 +147,12 @@ target for that direction falls back to full open/close.
 every light and switch, and `הדלק הכל` turns on every light plus only the switches marked
 `all_on: true` — a remotely powered socket or fan is a physical hazard, so switches must opt
 in. Covers are never included. Both ask `כן`/`לא` first, are refused while the HA WebSocket is
-down (no state tracking), and are limited to one prompt per 60s for the whole household (a
-cancelled or expired prompt counts too). The scope
+down (no state tracking), and are limited to one **confirmed** action per `min_interval_s`
+(default 10s, `0` = off) for the whole household — a cancelled or expired prompt costs nothing,
+and a `כן` that comes too soon is answered `יותר מדי פקודות, נסה עוד רגע` while the prompt
+stays open for a retry (each retry also counts toward the 6-per-minute `כן` cap). The prompt
+itself expires after 20s, so with `min_interval_s` above 20 a refused `כן` can't succeed
+within that prompt — send the command again once the interval has passed. The scope
 word must be the whole target (`כבה הכל`, `הדלק את הכל`; also `כבה כל`, since a leading ה is
 normalized away) — it never matches inside a longer phrase such as `כבה את כל האורות בסלון`.
 The word is validated at load: it may not be a device alias, a verb (or a prefix match of
