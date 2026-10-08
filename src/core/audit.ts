@@ -44,7 +44,9 @@ export type AuditReasonCode =
   // Issue #1: preset-position cover commands — live position unreadable, and a
   // deliberate no-op where the cover is already at/past the requested position.
   | 'position-unknown'
-  | 'noop-already-there';
+  | 'noop-already-there'
+  // The single summary event of a finished multi-device command.
+  | 'summary';
 
 export interface AuditEvent {
   readonly ts: number;
