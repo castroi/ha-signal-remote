@@ -83,9 +83,13 @@ const MOVING_MARKER = new Map([
 ]);
 
 // Fixed words only — a raw HA state string is never echoed into the reply.
+// Also the set of live cover states: a position under any other state
+// (e.g. unavailable) is stale and ignored.
 const COVER_WORD = new Map([
   ['open', 'פתוח'],
   ['closed', 'סגור'],
+  ['opening', 'נפתח…'],
+  ['closing', 'נסגר…'],
 ]);
 const TOGGLE_WORD = new Map([
   ['on', 'דלוק'],
@@ -95,8 +99,10 @@ const TOGGLE_WORD = new Map([
 function deviceState(type: EntityType, snap: EntitySnapshot | undefined): string {
   if (!snap) return UNAVAILABLE;
   if (type !== 'cover') return TOGGLE_WORD.get(snap.state) ?? UNAVAILABLE;
+  const word = COVER_WORD.get(snap.state);
+  if (word === undefined) return UNAVAILABLE;
   if (snap.position !== undefined) return `${snap.position}%${MOVING_MARKER.get(snap.state) ?? ''}`;
-  return COVER_WORD.get(snap.state) ?? UNAVAILABLE;
+  return word;
 }
 
 /**

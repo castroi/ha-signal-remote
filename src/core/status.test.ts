@@ -130,9 +130,21 @@ describe('formatDevices (per-device states in סטטוס)', () => {
     expect(out).toContain('מטבח 60% (נסגר…)');
   });
 
-  it('never echoes a prototype key as a moving marker', () => {
-    const out = formatDevices([entities[0]!], snaps({ 'cover.g': { state: 'constructor', position: 5 } }));
-    expect(out).toBe('🪟 תריסים\nגינה 5%');
+  it.each(['unavailable', 'unknown', 'constructor', '__proto__'])(
+    'ignores a stale position on a cover in state %j',
+    (state) => {
+      const out = formatDevices([entities[0]!], snaps({ 'cover.g': { state, position: 40 } }));
+      expect(out).toBe('🪟 תריסים\nגינה לא זמין');
+    },
+  );
+
+  it('describes a moving cover that reports no position', () => {
+    const out = formatDevices(
+      entities.slice(0, 2),
+      snaps({ 'cover.g': { state: 'opening' }, 'cover.k': { state: 'closing' } }),
+    );
+    expect(out).toContain('גינה נפתח…');
+    expect(out).toContain('מטבח נסגר…');
   });
 
   it('falls back to פתוח/סגור for a cover with no position', () => {
