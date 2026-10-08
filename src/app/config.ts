@@ -347,6 +347,11 @@ function validateAllTogglesScope(
   if (scopes.all_toggles === null || typeof scopes.all_toggles !== 'object') {
     throw new Error('Alias table invalid: scopes.all_toggles must contain a word');
   }
+  for (const key of Object.keys(scopes.all_toggles)) {
+    if (key !== 'word') {
+      throw new Error(`Alias table invalid: scopes.all_toggles has unknown key "${key}" (expected: word)`);
+    }
+  }
 
   const raw = scopes.all_toggles.word;
   const word = normalize(typeof raw === 'string' ? raw : '');

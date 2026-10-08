@@ -1820,6 +1820,18 @@ describe('per-device completion through the bridge', () => {
       expect(h.toggleCalls).toHaveLength(3);
     });
 
+    it('a prompt past its deadline but not yet ticked is not counted as superseded', async () => {
+      const lines: string[] = [];
+      const h = batchHarness({ audit: new AuditLogger({ salt: 's', sink: (l) => lines.push(l) }) });
+      await h.say('סגור תריסים');
+      h.nowRef.t += 20_001; // expired, but tick() has not run
+      const late = h.nowRef.t + 1;
+      await h.say('כבה הכל');
+      expect(lines.map((l) => JSON.parse(l) as AuditEvent).some((e) => e.reasonCode === 'superseded')).toBe(false);
+      await h.say('כן', 'u1', late); // no supersede → the timestamp guard does not apply
+      expect(h.toggleCalls).toHaveLength(3);
+    });
+
     it('הדלק הכל with nothing to turn on is refused without using the 60s window', async () => {
       const cfg = loadConfig({
         aliasPath: resolve(here, '__fixtures__/switches-only.yaml'),

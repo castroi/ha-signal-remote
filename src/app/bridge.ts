@@ -752,13 +752,12 @@ export class Bridge {
     // Fix item 6: if this sender already has a pending_confirm, cancel the
     // prior command cleanly so it does not emit a spurious failure reply ~20s
     // later. The new command supersedes the old one.
-    // An entry whose prompt already expired is stale, not a supersede.
+    // An entry whose prompt already expired (even if tick() hasn't processed it
+    // yet) is stale, not a supersede.
     const pendingId = this.pendingConfirm.get(env.sourceUuid);
     this.pendingConfirm.delete(env.sourceUuid);
     const priorCommandId =
-      pendingId !== undefined && this.stateMachine.stateOf(pendingId) === 'pending_confirm'
-        ? pendingId
-        : undefined;
+      pendingId !== undefined && this.stateMachine.isAwaitingConfirm(pendingId) ? pendingId : undefined;
     if (priorCommandId !== undefined) {
       this.stateMachine.cancelPendingConfirm(priorCommandId);
       this.audit?.log({

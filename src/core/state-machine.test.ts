@@ -588,6 +588,18 @@ describe('CommandStateMachine — per-device completion', () => {
     expect(sm.tick()).toEqual([]);
   });
 
+  it('isAwaitingConfirm is false once the confirm window has passed, even before tick', () => {
+    const now = { t: 0 };
+    const sm = machine(now);
+    sm.submitAll({ commandId: 'w1', sourceUuid: 'u1', verb: 'close', entities: [COVER, COVER2] });
+    now.t = 20_000;
+    expect(sm.isAwaitingConfirm('w1')).toBe(true);
+    now.t = 20_001;
+    expect(sm.stateOf('w1')).toBe('pending_confirm'); // tick has not run yet
+    expect(sm.isAwaitingConfirm('w1')).toBe(false);
+    expect(sm.isAwaitingConfirm('missing')).toBe(false);
+  });
+
   it('isPending is true only while the command still waits on that device', () => {
     const sm = machine();
     batch(sm, 'b15', 'close', [COVER, COVER2]);

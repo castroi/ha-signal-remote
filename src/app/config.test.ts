@@ -319,6 +319,12 @@ describe('all_toggles scope (כבה הכל / הדלק הכל)', () => {
     expect(() => make({ word })).toThrow(/all_toggles/);
   });
 
+  it('rejects unknown keys inside all_toggles (e.g. a typo of word)', () => {
+    expect(() =>
+      make({ scopes: { all_covers: { word: 'תריסים', expands_to_type: 'cover' }, all_toggles: { wrod: 'הכל' } } }),
+    ).toThrow(/unknown key "wrod"/);
+  });
+
   it('rejects an empty all_toggles block with a clear error', () => {
     expect(() =>
       make({ scopes: { all_covers: { word: 'תריסים', expands_to_type: 'cover' }, all_toggles: null } }),

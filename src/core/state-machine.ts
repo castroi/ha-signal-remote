@@ -184,6 +184,15 @@ export class CommandStateMachine {
     return this.commands.get(commandId)?.state;
   }
 
+  /** True while a batch can still be confirmed (pending and inside its window, even before tick). */
+  isAwaitingConfirm(commandId: string): boolean {
+    const rec = this.commands.get(commandId);
+    return (
+      rec?.state === 'pending_confirm' &&
+      (rec.confirmDeadline === undefined || this.now() <= rec.confirmDeadline)
+    );
+  }
+
   /** True while this command is still waiting on this device (issued, not settled). */
   isPending(commandId: string, entityId: string): boolean {
     const rec = this.commands.get(commandId);
