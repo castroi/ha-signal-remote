@@ -1,18 +1,23 @@
 name: Deploy
 
-# Build and publish the linux/arm64 image to GHCR on merge to main.
-# Publish-only: the Pi pulls the image itself (no inbound path to the Pi),
-# matching the design's "no inbound port" property (§3).
+# Build and publish a multi-arch (linux/amd64 + linux/arm64) image to GHCR on
+# merge to main. Publish-only: each host pulls the image itself (no inbound
+# path to it), matching the design's "no inbound port" property (§3).
 #
-# Pull on the Pi with:
+# The image is pushed under its commit tag first, smoke-tested on both
+# platforms, and only then promoted to `latest` — a broken build never
+# replaces the tag hosts pull.
+#
+# Pull on any host (Docker picks the matching architecture):
 #   docker pull ghcr.io/<owner>/home-control-bridge:latest
-# (Watchtower can automate the pull if you run it on the Pi.)
+# (Watchtower can automate the pull.)
 
 on:
   push:
     branches: [main]
 
-# One deploy at a time; a newer merge supersedes an in-flight build.
+# One deploy at a time. An in-flight run always finishes; a newer merge
+# replaces only a run that is still queued.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
@@ -29,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # arm64 build on an amd64 runner needs QEMU emulation.
+      # The amd64 leg builds natively; only arm64 needs QEMU emulation.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
         with:
@@ -50,20 +55,50 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
-          # `latest` for the rolling tag the Pi pulls, plus the commit SHA for
-          # pinning/rollback.
+          # Commit-SHA tag only; `latest` is promoted after the smoke test.
           tags: |
-            type=raw,value=latest
             type=sha,format=long
 
-      - name: Build and push (linux/arm64)
+      - name: Build and push (linux/amd64 + linux/arm64)
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Run the pushed image on each platform: node starts, the production
+      # deps resolve, and the compiled entry point is present.
+      - name: Smoke test (both platforms)
+        env:
+          REF: ${{ env.IMAGE }}:sha-${{ github.sha }}
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            echo "::group::$platform"
+            docker run --rm --platform "$platform" "$REF" node -e \
+              "import('ws').then(() => import('yaml')).then(() => require('node:fs').accessSync('dist/index.js'))"
+            echo "::endgroup::"
+          done
+
+      # Promote only if this commit is still the head of main, so re-running an
+      # old deploy can't roll `latest` back to an older image.
+      - name: Check commit is main's head
+        id: head
+        run: |
+          head=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$head" = "${{ github.sha }}" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::main has moved on; leaving latest unchanged (sha-${{ github.sha }} is still published)."
+          fi
+
+      - name: Promote to latest
+        if: steps.head.outputs.current == 'true'
+        env:
+          REF: ${{ env.IMAGE }}:sha-${{ github.sha }}
+        run: docker buildx imagetools create --tag "${{ env.IMAGE }}:latest" "$REF"

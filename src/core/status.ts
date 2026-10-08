@@ -7,12 +7,21 @@
  * enabled/disabled with the reason when disabled.
  */
 
+import type { EntityType } from '../app/config.js';
+
 export type CoversDisabledReason =
   | 'ws-down'
   | 'clock-skew'
   | 'clock-offline'
   | 'clock-future'
   | 'kill-switch';
+
+/** One entity's live state as read from HA for the device section of `סטטוס`. */
+export interface EntitySnapshot {
+  readonly state: string;
+  /** Covers only: attributes.current_position, when an integer 0–100. */
+  readonly position?: number;
+}
 
 export interface StatusInputs {
   readonly wsHealthy: boolean;
@@ -50,4 +59,68 @@ export function formatStatus(report: StatusReport): string {
       ? 'תריסים פעילים'
       : `תריסים מושבתים (${report.coversReason ?? 'לא ידוע'})`;
   return `מצב: WS ${wsHe} | שעון ${clockHe} | כיבוי חירום ${killHe} | ${coversHe}`;
+}
+
+/** A configured entity as listed in the device section (name = its first alias). */
+export interface DeviceEntry {
+  readonly name: string;
+  readonly type: EntityType;
+  readonly entityId: string;
+}
+
+const UNAVAILABLE = 'לא זמין';
+
+const GROUP_HEADER: Record<EntityType, string> = {
+  cover: '🪟 תריסים',
+  light: '💡 אורות',
+  switch: '🔌 מתגים',
+};
+
+// Maps (not object literals) so an HA state like "constructor" can't hit a prototype key.
+const MOVING_MARKER = new Map([
+  ['opening', ' (נפתח…)'],
+  ['closing', ' (נסגר…)'],
+]);
+
+// Fixed words only — a raw HA state string is never echoed into the reply.
+// Also the set of live cover states: a position under any other state
+// (e.g. unavailable) is stale and ignored.
+const COVER_WORD = new Map([
+  ['open', 'פתוח'],
+  ['closed', 'סגור'],
+  ['opening', 'נפתח…'],
+  ['closing', 'נסגר…'],
+]);
+const TOGGLE_WORD = new Map([
+  ['on', 'דלוק'],
+  ['off', 'כבוי'],
+]);
+
+function deviceState(type: EntityType, snap: EntitySnapshot | undefined): string {
+  if (!snap) return UNAVAILABLE;
+  if (type !== 'cover') return TOGGLE_WORD.get(snap.state) ?? UNAVAILABLE;
+  const word = COVER_WORD.get(snap.state);
+  if (word === undefined) return UNAVAILABLE;
+  if (snap.position !== undefined) return `${snap.position}%${MOVING_MARKER.get(snap.state) ?? ''}`;
+  return word;
+}
+
+/**
+ * Device section of `סטטוס`: one line per configured entity, grouped by type in
+ * config order (empty groups omitted). `snapshots === undefined` means HA was
+ * unreachable and collapses the section to a single line.
+ */
+export function formatDevices(
+  entities: readonly DeviceEntry[],
+  snapshots: ReadonlyMap<string, EntitySnapshot> | undefined,
+): string {
+  if (!snapshots) return `מצב מכשירים ${UNAVAILABLE}`;
+  const groups: string[] = [];
+  for (const type of Object.keys(GROUP_HEADER) as EntityType[]) {
+    const lines = entities
+      .filter((e) => e.type === type)
+      .map((e) => `${e.name} ${deviceState(type, snapshots.get(e.entityId))}`);
+    if (lines.length > 0) groups.push([GROUP_HEADER[type], ...lines].join('\n'));
+  }
+  return groups.join('\n\n');
 }

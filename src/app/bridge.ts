@@ -17,7 +17,14 @@ import {
 } from '../core/state-machine.js';
 import { WsHealthGate } from '../adapters/ha-ws.js';
 import { KillSwitch } from '../core/kill-switch.js';
-import { buildStatus, formatStatus, type CoversDisabledReason } from '../core/status.js';
+import {
+  buildStatus,
+  formatDevices,
+  formatStatus,
+  type CoversDisabledReason,
+  type DeviceEntry,
+  type EntitySnapshot,
+} from '../core/status.js';
 import { type AuditLogger } from '../core/audit.js';
 import type { HaCallResult } from '../adapters/ha-rest.js';
 import type { IncomingEnvelope } from '../adapters/signal.js';
@@ -41,6 +48,8 @@ export interface HaRestPort {
   callToggle(domain: ToggleDomain, entityId: string, verb: ToggleVerb): Promise<HaCallResult>;
   /** Read a cover's live current_position (0–100); undefined when unreadable/unreported. */
   getCoverPosition(entityId: string): Promise<number | undefined>;
+  /** Live state of each entity for סטטוס; undefined when HA is unreachable. */
+  getStates(entityIds: readonly string[]): Promise<ReadonlyMap<string, EntitySnapshot> | undefined>;
   /** Drive covers to a preset position via the household HA script. */
   callPositionScript(
     scriptEntityId: string,
@@ -107,6 +116,10 @@ export class Bridge {
   private readonly wsGate: WsHealthGate;
   private readonly killSwitch = new KillSwitch();
   private cmdSeq = 0;
+  private statusCache:
+    | { at: number; snapshots: ReadonlyMap<string, EntitySnapshot> | undefined }
+    | undefined;
+  private statusInFlight: Promise<ReadonlyMap<string, EntitySnapshot> | undefined> | undefined;
   private reinitialized = false;
   /**
    * Fix item 8 (LOW): latch the most-recently-detected future-timestamp delta
@@ -205,7 +218,7 @@ export class Bridge {
     // Parse first so reserved control words (סטטוס) bypass freshness/rate gates.
     const parsed = parseCommand(env.message, this.cfg.aliases);
     if (parsed.kind === 'control-reply' && parsed.word === 'סטטוס') {
-      await this.reply(env, this.statusMessage());
+      await this.reply(env, await this.statusMessage());
       this.audit?.log({
         ts: this.now(),
         sourceUuid: env.sourceUuid,
@@ -829,7 +842,52 @@ export class Bridge {
     return REPLY.coversDisabledClock;
   }
 
-  private statusMessage(): string {
+  /**
+   * Health line (computed before any HA call, so it always goes out) plus the
+   * per-device section. The device read never fails the reply.
+   */
+  private async statusMessage(): Promise<string> {
+    const health = this.healthLine();
+    const entities: DeviceEntry[] = [];
+    for (const e of this.cfg.aliases.entities.values()) {
+      entities.push({ name: e.aliases[0] ?? e.canonical, type: e.type, entityId: e.entityId });
+    }
+    if (entities.length === 0) return health;
+    let snapshots: ReadonlyMap<string, EntitySnapshot> | undefined;
+    try {
+      snapshots = await this.deviceSnapshot(entities.map((e) => e.entityId));
+    } catch {
+      snapshots = undefined;
+    }
+    return `${health}\n\n${formatDevices(entities, snapshots)}`;
+  }
+
+  /**
+   * Single-flight + short cache around the HA state read: סטטוס bypasses the rate
+   * gate and envelopes are handled concurrently, so without this N messages would
+   * fan out into N parallel reads of every entity (security review, finding #1).
+   */
+  private deviceSnapshot(
+    entityIds: readonly string[],
+  ): Promise<ReadonlyMap<string, EntitySnapshot> | undefined> {
+    if (this.statusCache && this.now() - this.statusCache.at < STATUS_CACHE_MS) {
+      return Promise.resolve(this.statusCache.snapshots);
+    }
+    if (!this.statusInFlight) {
+      this.statusInFlight = this.haRest
+        .getStates(entityIds)
+        .then((snapshots) => {
+          this.statusCache = { at: this.now(), snapshots };
+          return snapshots;
+        })
+        .finally(() => {
+          this.statusInFlight = undefined;
+        });
+    }
+    return this.statusInFlight;
+  }
+
+  private healthLine(): string {
     const clock = this.clockHealth();
     let reason: CoversDisabledReason | undefined;
     if (!this.wsGate.coversEnabled()) reason = 'ws-down';
@@ -855,6 +913,9 @@ export class Bridge {
     await this.signal.send(env.sourceUuid, env.sourceNumber ?? '', message);
   }
 }
+
+/** How long one סטטוס device snapshot is reused before HA is read again. */
+const STATUS_CACHE_MS = 3_000;
 
 /** Status label per clock-unhealthy cause, so סטטוס reports the real reason. */
 const CLOCK_REASON_LABEL: Record<ClockUnhealthyReason, CoversDisabledReason> = {
