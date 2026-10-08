@@ -46,6 +46,7 @@ The pure core means most behavior is unit-testable without Signal or Home Assist
 | **Rate limiting** | 5/30s per sender + 15/30s global. A valid `כן`/`לא` confirm bypasses the caps via a reserved lane (itself capped at 6/sender/min). |
 | **Kill switch** | Blocks all new commands (guaranteed) and best-effort issues `stop_cover` to every in-flight cover. Status/help still reply in safe mode. |
 | **Allowlist** | Identity is pinned on Signal `sourceUuid` (ACI), not phone number. Unknown senders are silently dropped (rate-limited log, no message body). |
+| **Status disclosure** | `סטטוס` reports live device states, which reveal occupancy patterns (lights on, covers closed). The reply goes only 1:1 to an allowlisted sender, but it persists in Signal history and lock-screen notifications on every allowlisted device. The HA read is shared across concurrent requests and cached for 3s; device states are never written to the audit log. |
 | **Privacy-safe audit log** | Logs salted UUID hash, normalized intent, entity, result, latency, reason code — **never the raw message body, token, or PII.** |
 | **Safe startup** | On restart, all pending operations are cleared and in-flight commands abandoned (not resumed); refuses action until a fresh command arrives. |
 
@@ -158,7 +159,7 @@ A message is `verb + entity`, e.g. `סגור סלון` (close salon) or `פתח 
 | `הדלק` / `כבה` | Turn a light **or switch** on / off |
 | `תריסים` | All-covers scope — prompts a context-bound `כן`/`לא` confirmation (20s expiry) before acting |
 | `כן` / `לא` | Yes / No — confirm or cancel a pending all-covers action |
-| `סטטוס` | Status — always answered for authorized senders: WS / clock / kill-switch / covers-enabled state |
+| `סטטוס` | Status — always answered for authorized senders: WS / clock / kill-switch / covers-enabled state, then every configured device (covers as position %, lights/switches as on/off; `לא זמין` when unreadable) |
 | `עזרה`, `תפריט` | Help / menu |
 
 Cover feedback is two-stage (`מבצע…` then completion); lights and switches are single-stage. A command that exceeds its per-entity `completion_timeout_ms` returns a timeout + manual-check reply — never a false success. Sending a new command for a cover already in motion preempts it (stop, then the new direction).

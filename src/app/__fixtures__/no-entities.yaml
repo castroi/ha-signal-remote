@@ -1,0 +1,10 @@
+verbs:
+  open: ["פתח"]
+  close: ["סגור"]
+
+entities: {}
+
+scopes:
+  all_covers:
+    word: "תריסים"
+    expands_to_type: cover

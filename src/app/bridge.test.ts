@@ -4,34 +4,40 @@ import { dirname, resolve } from 'node:path';
 import { Bridge } from './bridge.js';
 import { loadConfig, type Config } from './config.js';
 import { AuditLogger, type AuditEvent } from '../core/audit.js';
+import type { EntitySnapshot } from '../core/status.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const aliasPath = resolve(here, '../../config/aliases.example.yaml');
 
+const testConfigEnv = {
+  HA_TOKEN: 'tok',
+  HA_BASE_URL: 'http://localhost:8123',
+  SIGNAL_API_URL: 'http://localhost:8080',
+  SIGNAL_TOKEN: 'wrapper-token',
+  BOT_NUMBER: '+1555',
+  ALLOWLIST_UUIDS: 'u1',
+  AUDIT_SALT: 'salt',
+};
+
 function testConfig(): Config {
-  return loadConfig({
-    aliasPath,
-    env: {
-      HA_TOKEN: 'tok',
-      HA_BASE_URL: 'http://localhost:8123',
-      SIGNAL_API_URL: 'http://localhost:8080',
-      SIGNAL_TOKEN: 'wrapper-token',
-      BOT_NUMBER: '+1555',
-      ALLOWLIST_UUIDS: 'u1',
-      AUDIT_SALT: 'salt',
-    },
-  });
+  return loadConfig({ aliasPath, env: testConfigEnv });
 }
 
-// Default stubs for the preset-only port methods; non-preset tests never hit them.
+// Default stubs for the preset-only and status-only port methods; other tests never hit them.
 const noPositionPort = {
   getCoverPosition: async (): Promise<number | undefined> => undefined,
+  getStates: async (): Promise<ReadonlyMap<string, EntitySnapshot> | undefined> => undefined,
   callPositionScript: async () => ({ ok: true }) as const,
 };
 
 // clockRef lets a test pin lastGoodCheckAt (default: tracks now, i.e. a good
 // reference check "just happened" — the healthy steady state).
-function harness(nowRef = { t: 1_000_000 }, clockRef?: { lastGoodCheckAt: number }) {
+function harness(
+  nowRef = { t: 1_000_000 },
+  clockRef?: { lastGoodCheckAt: number },
+  getStates: (ids: readonly string[]) => Promise<ReadonlyMap<string, EntitySnapshot> | undefined> =
+    noPositionPort.getStates,
+) {
   const sends: { message: string }[] = [];
   const haCalls: { entityId: string; verb: string; domain?: string }[] = [];
   const notices: string[] = [];
@@ -42,6 +48,7 @@ function harness(nowRef = { t: 1_000_000 }, clockRef?: { lastGoodCheckAt: number
     emitNotice: (text) => notices.push(text),
     haRest: {
       ...noPositionPort,
+      getStates,
       callCover: vi.fn(async (entityId: string, verb: string) => {
         haCalls.push({ entityId, verb });
         return { ok: true } as const;
@@ -189,6 +196,185 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
     h.bridge.engageKill();
     await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
     expect(h.sends.some((s) => s.message.startsWith('מצב:'))).toBe(true);
+  });
+
+  describe('סטטוס device states', () => {
+    const configuredIds = [
+      'cover.living_room',
+      'cover.kitchen',
+      'cover.kids_room',
+      'cover.parents_room',
+      'light.garden',
+      'switch.fan',
+      'switch.garden_socket',
+    ];
+    const allOpen = async (_ids?: readonly string[]) =>
+      new Map<string, EntitySnapshot>([
+        ['cover.living_room', { state: 'open', position: 20 }],
+        ['cover.kitchen', { state: 'closing', position: 45 }],
+        ['light.garden', { state: 'on' }],
+        ['switch.fan', { state: 'off' }],
+      ]);
+
+    it('appends the device section under the health line', async () => {
+      const h = harness(undefined, undefined, allOpen);
+      await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      const [health, devices] = h.sends[0]!.message.split('\n\n🪟');
+      expect(health!.startsWith('מצב:')).toBe(true);
+      expect(health!.includes('\n')).toBe(false);
+      expect(`🪟${devices}`).toBe(
+        [
+          '🪟 תריסים',
+          'סלון 20%',
+          'מטבח 45% (נסגר…)',
+          'חדר ילדים לא זמין',
+          'חדר הורים לא זמין',
+          '',
+          '💡 אורות',
+          'גינה דלוק',
+          '',
+          '🔌 מתגים',
+          'מאוורר כבוי',
+          'שקע לא זמין',
+        ].join('\n'),
+      );
+    });
+
+    it('reads exactly the configured entity ids', async () => {
+      const getStates = vi.fn(allOpen);
+      const h = harness(undefined, undefined, getStates);
+      await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      expect(getStates).toHaveBeenCalledTimes(1);
+      expect([...(getStates.mock.calls[0]![0] ?? [])].sort()).toEqual([...configuredIds].sort());
+    });
+
+    it('still reports devices while the kill switch is engaged', async () => {
+      const h = harness(undefined, undefined, allOpen);
+      h.bridge.engageKill();
+      await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      expect(h.sends[0]!.message).toContain('כיבוי חירום פעיל');
+      expect(h.sends[0]!.message).toContain('סלון 20%');
+    });
+
+    it('sends the health line plus one unavailable line when HA is unreachable', async () => {
+      const h = harness(undefined, undefined, async () => undefined);
+      await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      expect(h.sends[0]!.message).toMatch(/^מצב: .*\n\nמצב מכשירים לא זמין$/);
+    });
+
+    it('still sends the health line when the read rejects, without leaking the error', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      try {
+        const h = harness(undefined, undefined, async () => {
+          throw new Error('Bearer tok http://localhost:8123 <html>body</html>');
+        });
+        await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+        expect(h.sends[0]!.message).toMatch(/^מצב: .*\n\nמצב מכשירים לא זמין$/);
+        const logged = [...errSpy.mock.calls, ...logSpy.mock.calls].flat().join(' ');
+        expect(logged).not.toContain('tok');
+        expect(logged).not.toContain('8123');
+        expect(logged).not.toContain('body');
+      } finally {
+        errSpy.mockRestore();
+        logSpy.mockRestore();
+      }
+    });
+
+    it('shares one HA read across concurrent סטטוס messages', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const getStates = vi.fn(async () => {
+        await gate;
+        return allOpen();
+      });
+      const h = harness(undefined, undefined, getStates);
+      const a = h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      h.nowRef.t += 1; // distinct timestamp so dedup doesn't drop the second
+      const b = h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      // Both requests are now waiting and no snapshot is cached yet, so only the
+      // in-flight share (not the 3s cache) can keep this at one read.
+      await new Promise((r) => setImmediate(r));
+      expect(getStates).toHaveBeenCalledTimes(1);
+      release();
+      await Promise.all([a, b]);
+      expect(getStates).toHaveBeenCalledTimes(1);
+      expect(h.sends).toHaveLength(2);
+      expect(h.sends.every((s) => s.message.includes('סלון 20%'))).toBe(true);
+    });
+
+    it('sends only the health line when no entities are configured', async () => {
+      const getStates = vi.fn(allOpen);
+      const sends: string[] = [];
+      const nowRef = { t: 1_000_000 };
+      const bridge = new Bridge({
+        config: loadConfig({
+          aliasPath: resolve(here, '__fixtures__/no-entities.yaml'),
+          env: testConfigEnv,
+        }),
+        now: () => nowRef.t,
+        haRest: {
+          ...noPositionPort,
+          getStates,
+          callCover: vi.fn(async () => ({ ok: true }) as const),
+          callToggle: vi.fn(async () => ({ ok: true }) as const),
+        },
+        signal: {
+          send: vi.fn(async (_u: string, _n: string, message: string) => {
+            sends.push(message);
+            return true;
+          }),
+        },
+        clock: {
+          snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }),
+        },
+      });
+      await bridge.handleEnvelope(envelope('סטטוס', nowRef));
+      expect(getStates).not.toHaveBeenCalled();
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toMatch(/^מצב: [^\n]*$/);
+    });
+
+    it('caches the snapshot for 3s, then reads again', async () => {
+      const getStates = vi.fn(allOpen);
+      const h = harness(undefined, undefined, getStates);
+      await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      h.nowRef.t += 2_999;
+      await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      expect(getStates).toHaveBeenCalledTimes(1);
+      h.nowRef.t += 1;
+      await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      expect(getStates).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps device states out of the audit log', async () => {
+      const auditLines: string[] = [];
+      const nowRef = { t: 1_000_000 };
+      const audit = new AuditLogger({ salt: 'test-salt', sink: (line) => auditLines.push(line) });
+      const bridge = new Bridge({
+        config: testConfig(),
+        now: () => nowRef.t,
+        audit,
+        haRest: {
+          ...noPositionPort,
+          getStates: allOpen,
+          callCover: vi.fn(async () => ({ ok: true }) as const),
+          callToggle: vi.fn(async () => ({ ok: true }) as const),
+        },
+        signal: { send: vi.fn(async () => true) },
+        clock: {
+          snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }),
+        },
+      });
+      await bridge.handleEnvelope(envelope('סטטוס', nowRef));
+      const events = auditLines.map((l) => JSON.parse(l) as AuditEvent);
+      expect(events.filter((e) => e.intent === 'status')).toEqual([
+        expect.objectContaining({ intent: 'status', result: 'status' }),
+      ]);
+      for (const line of auditLines) {
+        expect(line).not.toMatch(/סלון|גינה|%|position|cover\.|light\./);
+      }
+    });
   });
 
   it('answers עזרה/תפריט with the help menu (audited), even in kill-switch safe mode', async () => {

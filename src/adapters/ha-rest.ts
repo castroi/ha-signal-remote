@@ -12,6 +12,10 @@
 // (item 11).
 import type { CoverVerb, ToggleDomain, ToggleVerb } from '../core/state-machine.js';
 export type { CoverVerb, ToggleDomain, ToggleVerb };
+import type { EntitySnapshot } from '../core/status.js';
+
+/** Per-read timeout for status snapshots — short so סטטוס stays responsive when HA is down. */
+const STATE_READ_TIMEOUT_MS = 3_000;
 
 export type HaCallResult = { ok: true } | { ok: false; reason: 'failed' };
 
@@ -74,6 +78,45 @@ export class HaRestClient {
       if (!res.ok) return undefined;
       const body = (await res.json()) as { attributes?: { current_position?: number } };
       return body.attributes?.current_position;
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Read the live state of each entity (one GET per id, in parallel) for `סטטוס`.
+   * The body is untrusted: an entry is kept only when `state` is a string, and
+   * `position` only when `current_position` is an integer 0–100. A failed read just
+   * omits that id; returns undefined when every read failed (HA unreachable).
+   */
+  async getStates(entityIds: readonly string[]): Promise<Map<string, EntitySnapshot> | undefined> {
+    const results = await Promise.all(
+      entityIds.map(async (id) => [id, await this.readState(id)] as const),
+    );
+    const states = new Map<string, EntitySnapshot>();
+    for (const [id, snap] of results) if (snap) states.set(id, snap);
+    return states.size > 0 ? states : undefined;
+  }
+
+  private async readState(entityId: string): Promise<EntitySnapshot | undefined> {
+    const url = `${this.baseUrl}/api/states/${encodeURIComponent(entityId)}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), STATE_READ_TIMEOUT_MS);
+    try {
+      const res = await this.fetchImpl(url, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${this.token}` },
+        signal: controller.signal,
+      });
+      if (!res.ok) return undefined;
+      const body = (await res.json()) as { state?: unknown; attributes?: { current_position?: unknown } };
+      if (typeof body.state !== 'string') return undefined;
+      const pos = body.attributes?.current_position;
+      return Number.isInteger(pos) && (pos as number) >= 0 && (pos as number) <= 100
+        ? { state: body.state, position: pos as number }
+        : { state: body.state };
     } catch {
       return undefined;
     } finally {
