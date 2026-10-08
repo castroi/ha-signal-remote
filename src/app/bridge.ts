@@ -729,11 +729,13 @@ export class Bridge {
 
   private async runEffects(effects: Effect[]): Promise<void> {
     for (const e of effects) {
-      // A batch issues one HA call at a time; once the kill switch engages, issue
-      // nothing more (engageKill already dropped the tracking). Stops still go out.
+      // A batch issues one HA call at a time and envelopes run concurrently, so by
+      // the time a call's turn comes its device may be done already (snapshot),
+      // taken over by a newer command, or dropped by the kill switch. Only call HA
+      // for devices this command is still waiting on. Stops always go out.
       if (
         (e.kind === 'issue-cover' || e.kind === 'issue-cover-position' || e.kind === 'issue-toggle') &&
-        this.killSwitch.blocksCommands()
+        !this.stateMachine.isPending(e.commandId, e.entityId)
       ) {
         continue;
       }

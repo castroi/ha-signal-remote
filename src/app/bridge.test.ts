@@ -1609,6 +1609,36 @@ describe('per-device completion through the bridge', () => {
     expect(h.coverCalls.filter((c) => c.verb === 'close')).toHaveLength(1);
   });
 
+  it('a single command arriving mid-batch is not overridden by the batch', async () => {
+    const h = batchHarness();
+    const callCover = (h.bridge as unknown as { haRest: { callCover: ReturnType<typeof vi.fn> } }).haRest.callCover;
+    let single: Promise<void> | undefined;
+    callCover.mockImplementationOnce(async (entityId: string, verb: string) => {
+      h.coverCalls.push({ entityId, verb });
+      // While the batch is on its first cover, the kitchen gets its own command.
+      single = h.say('פתח מטבח');
+      await single;
+      return { ok: true } as const;
+    });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    await single;
+    const kitchen = h.coverCalls.filter((c) => c.entityId === 'cover.kitchen').map((c) => c.verb);
+    expect(kitchen).toEqual(['stop', 'open']); // the batch's older 'close' never follows
+    expect(h.coverCalls.filter((c) => c.verb === 'close').map((c) => c.entityId)).toEqual([
+      'cover.living_room',
+      'cover.kids_room',
+      'cover.parents_room',
+    ]);
+  });
+
+  it('a device already at its target gets no HA call', async () => {
+    const h = batchHarness({ states: new Map([['cover.living_room', { state: 'closed', position: 0 }]]) });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    expect(h.coverCalls.some((c) => c.entityId === 'cover.living_room')).toBe(false);
+  });
+
   it('K: a כן sent after the kill switch dropped the pending confirm says why', async () => {
     const h = batchHarness();
     await h.say('סגור תריסים');

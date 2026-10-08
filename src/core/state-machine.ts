@@ -159,6 +159,12 @@ export class CommandStateMachine {
     return this.commands.get(commandId)?.state;
   }
 
+  /** True while this command is still waiting on this device (issued, not settled). */
+  isPending(commandId: string, entityId: string): boolean {
+    const rec = this.commands.get(commandId);
+    return rec?.state === 'issued' && rec.outcomes.get(entityId) === 'pending';
+  }
+
   /** The devices a command targets (e.g. to snapshot them before a confirm issues). */
   entityIdsOf(commandId: string): string[] {
     return this.commands.get(commandId)?.entities.map((e) => e.entityId) ?? [];

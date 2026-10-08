@@ -566,6 +566,19 @@ describe('CommandStateMachine — per-device completion', () => {
     expect(sm.tick()).toEqual([]);
   });
 
+  it('isPending is true only while the command still waits on that device', () => {
+    const sm = machine();
+    batch(sm, 'b15', 'close', [COVER, COVER2]);
+    expect(sm.isPending('b15', COVER.entityId)).toBe(true);
+    sm.observeState(COVER.entityId, 'closed');
+    expect(sm.isPending('b15', COVER.entityId)).toBe(false);
+    sm.submit({ commandId: 's4', sourceUuid: 'u1', verb: 'open', entity: COVER2 });
+    expect(sm.isPending('b15', COVER2.entityId)).toBe(false); // preempted
+    expect(sm.isPending('s4', COVER2.entityId)).toBe(true);
+    sm.clearAll();
+    expect(sm.isPending('s4', COVER2.entityId)).toBe(false);
+  });
+
   it('issuedCoverEntityIds lists only covers still pending', () => {
     const sm = machine();
     batch(sm, 'b14', 'close', [COVER, COVER2]);
