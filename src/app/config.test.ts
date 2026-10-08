@@ -247,6 +247,135 @@ describe('alias table validation (issue #1 hardening)', () => {
   });
 });
 
+describe('all_toggles scope (כבה הכל / הדלק הכל)', () => {
+  type Raw = ConstructorParameters<typeof AliasTable>[0];
+  const dev = (type: string, entity_id: string, aliases: string[], extra: Record<string, unknown> = {}) => ({
+    type,
+    entity_id,
+    completion_timeout_ms: 5_000,
+    aliases,
+    ...extra,
+  });
+  const defaultEntities = {
+    salon: dev('cover', 'cover.living_room', ['סלון']),
+    garden: dev('light', 'light.garden', ['גינה']),
+    wall: dev('light', 'light.wall', ['קיר']),
+    fan: dev('switch', 'switch.fan', ['מאוורר'], { all_on: true }),
+    socket: dev('switch', 'switch.socket', ['שקע']),
+  };
+  const make = (
+    opts: { word?: string | null; entities?: Record<string, unknown>; scopes?: Record<string, unknown> } = {},
+  ): AliasTable =>
+    new AliasTable({
+      verbs: { open: ['פתח'], close: ['סגור'], on: ['הדלק'], off: ['כבה', 'לכבות'] },
+      entities: opts.entities ?? defaultEntities,
+      scopes: opts.scopes ?? {
+        all_covers: { word: 'תריסים', expands_to_type: 'cover' },
+        ...(opts.word === null ? {} : { all_toggles: { word: opts.word ?? 'הכל' } }),
+      },
+    } as unknown as Raw);
+
+  it('is off when the scope is not configured', () => {
+    expect(make({ word: null }).allTogglesWord).toBeUndefined();
+  });
+
+  it('stores the normalized word (the leading ה is stripped)', () => {
+    expect(make().allTogglesWord).toBe('כל');
+  });
+
+  it('off expands to every light and switch in config order, never covers', () => {
+    expect(make().toggleEntityIds('off')).toEqual(['light.garden', 'light.wall', 'switch.fan', 'switch.socket']);
+  });
+
+  it('on expands to every light plus only switches marked all_on', () => {
+    expect(make().toggleEntityIds('on')).toEqual(['light.garden', 'light.wall', 'switch.fan']);
+  });
+
+  it.each([
+    ['cover', 'cover.x'],
+    ['light', 'light.x'],
+  ])('rejects all_on on a %s', (type, id) => {
+    const entities = { ...defaultEntities, bad: dev(type, id, ['רע'], { all_on: true }) };
+    expect(() => make({ entities })).toThrow(/all_on/);
+  });
+
+  it('rejects a non-boolean all_on', () => {
+    const entities = { ...defaultEntities, bad: dev('switch', 'switch.x', ['רע'], { all_on: 'yes' }) };
+    expect(() => make({ entities })).toThrow(/all_on/);
+  });
+
+  it.each([
+    ['an entity alias', 'גינה'],
+    ['an entity alias after normalization', 'הגינה'],
+    ['a verb variant', 'כבה'],
+    ['a prefix of a verb variant', 'לכב'],
+    ['a word a verb variant is a prefix of', 'הדלקה'],
+    ['the all-covers word', 'תריסים'],
+    ['a reserved word', 'עזרה'],
+    ['an empty word', ''],
+    ['a one-letter word', 'הא'],
+    ['more than one word', 'כל הבית'],
+  ])('rejects a scope word that is %s', (_label, word) => {
+    expect(() => make({ word })).toThrow(/all_toggles/);
+  });
+
+  it('rejects an empty all_toggles block with a clear error', () => {
+    expect(() =>
+      make({ scopes: { all_covers: { word: 'תריסים', expands_to_type: 'cover' }, all_toggles: null } }),
+    ).toThrow(/scopes\.all_toggles/);
+  });
+
+  it('trims the word for help text', () => {
+    const t = new AliasTable({
+      verbs: { on: ['הדלק'], off: ['כבה'] },
+      entities: defaultEntities,
+      scopes: { all_covers: { word: 'תריסים', expands_to_type: 'cover' }, all_toggles: { word: ' הכל ' } },
+      messages: { help: '"כבה {all}"' },
+    } as unknown as Raw);
+    expect(t.helpText()).toBe('"כבה הכל"');
+  });
+
+  it('rejects unknown keys under scopes', () => {
+    expect(() =>
+      make({
+        scopes: { all_covers: { word: 'תריסים', expands_to_type: 'cover' }, all_lights: { word: 'אורות' } },
+      }),
+    ).toThrow(/scopes/);
+  });
+
+  it('rejects all_toggles when there are no lights or switches', () => {
+    expect(() => make({ entities: { salon: dev('cover', 'cover.living_room', ['סלון']) } })).toThrow(
+      /all_toggles/,
+    );
+  });
+
+  it('help fills {all} with the configured word and drops the line when the scope is off', () => {
+    const help = (word: string | null) =>
+      new AliasTable({
+        verbs: { on: ['הדלק'], off: ['כבה'] },
+        entities: defaultEntities,
+        scopes: {
+          all_covers: { word: 'תריסים', expands_to_type: 'cover' },
+          ...(word === null ? {} : { all_toggles: { word } }),
+        },
+        messages: { help: 'אורות: {lights}\n"כבה {all}" / "הדלק {all}"' },
+      } as unknown as Raw).helpText();
+    expect(help('הכל')).toBe('אורות: גינה · קיר\n"כבה הכל" / "הדלק הכל"');
+    expect(help(null)).toBe('אורות: גינה · קיר');
+  });
+
+  it('the built-in help mentions the scope only when it is configured', () => {
+    expect(make().helpText()).toContain('"כבה הכל" / "הדלק הכל"');
+    expect(make({ word: null }).helpText()).not.toContain('{all}');
+    expect(make({ word: null }).helpText()).not.toContain('הדלק הכל');
+  });
+
+  it('does not reserve הכל when the scope is not configured', () => {
+    const entities = { ...defaultEntities, all: dev('light', 'light.all', ['הכל']) };
+    expect(() => make({ word: null, entities })).not.toThrow();
+  });
+});
+
 describe('secret loading (fail-fast, design §6)', () => {
   it('reads all required secrets from env', () => {
     const secrets = loadSecrets(validEnv());

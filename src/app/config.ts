@@ -68,6 +68,8 @@ export interface EntityDef {
   readonly closePosition?: number | undefined;
   /** Completion tolerance band (%); resolved from per-cover override or the script default. */
   readonly tolerancePercent?: number | undefined;
+  /** Switches only: also turned on by the all-toggles scope (`הדלק הכל`). */
+  readonly allOn?: boolean | undefined;
 }
 
 /** Default completion tolerance band (%) when neither per-cover nor script-level override is set. */
@@ -76,8 +78,8 @@ export const DEFAULT_TOLERANCE_PERCENT = 3;
 /**
  * Fallback help/menu text when the alias table has no `messages.help`. `{rooms}`,
  * `{lights}` and `{switches}` are filled at render time from the configured
- * entities so the device list never drifts; a line whose placeholder resolves to
- * empty is dropped.
+ * entities so the device list never drifts, and `{all}` with the all-toggles
+ * scope word; a line whose placeholder resolves to empty is dropped.
  */
 export const DEFAULT_HELP_TEMPLATE = [
   '🪟 תריסים — "פתח" / "סגור" / "עצור" + חדר',
@@ -92,6 +94,7 @@ export const DEFAULT_HELP_TEMPLATE = [
   'מתגים: {switches}',
   '',
   '🏠 כל התריסים — שלח "תריסים", ואז כן / לא',
+  '🏠 כל האורות והמתגים — "כבה {all}" / "הדלק {all}", ואז כן / לא',
   'ℹ️ מצב המערכת — שלח "סטטוס"',
 ].join('\n');
 
@@ -117,15 +120,23 @@ interface RawAliasFile {
       open_position?: number;
       close_position?: number;
       tolerance_percent?: number;
+      all_on?: boolean;
     }
   >;
-  scopes: { all_covers: { word: string; expands_to_type: EntityType } };
+  scopes: {
+    all_covers: { word: string; expands_to_type: EntityType };
+    all_toggles?: { word: string } | null;
+  };
   position_scripts?: { open: string; close: string; default_tolerance_percent?: number };
   messages?: { help?: string };
 }
 
 export class AliasTable {
   readonly allCoversWord: string;
+  /** Normalized all-toggles scope word; undefined when the scope is not configured. */
+  readonly allTogglesWord: string | undefined;
+  /** The scope word as configured (for help text); empty when not configured. */
+  private readonly allTogglesLabel: string;
   readonly entities: ReadonlyMap<string, EntityDef>;
   readonly positionScripts: PositionScripts | undefined;
   private readonly aliasIndex: ReadonlyMap<string, EntityDef>;
@@ -161,6 +172,11 @@ export class AliasTable {
       assertValidPosition(def.open_position, canonical, 'open_position');
       assertValidPosition(def.close_position, canonical, 'close_position');
       assertValidPercent(def.tolerance_percent, canonical, 'tolerance_percent');
+      if (def.all_on !== undefined && (typeof def.all_on !== 'boolean' || def.type !== 'switch')) {
+        throw new Error(
+          `Alias table invalid: ${canonical}.all_on must be true/false and is only allowed on a switch`,
+        );
+      }
       const hasPreset = def.open_position !== undefined || def.close_position !== undefined;
       anyPreset = anyPreset || hasPreset;
       const entity: EntityDef = {
@@ -174,6 +190,7 @@ export class AliasTable {
         // Resolve the completion band: per-cover override, else the script default.
         // Only meaningful for covers that have a preset target.
         tolerancePercent: hasPreset ? (def.tolerance_percent ?? defaultTolerance) : undefined,
+        allOn: def.all_on,
       };
       entities.set(entity.entityId, entity);
       for (const alias of def.aliases) {
@@ -205,6 +222,8 @@ export class AliasTable {
     this.aliasIndex = aliasIndex;
     this.verbIndex = verbIndex;
     this.allCoversWord = normalize(raw.scopes.all_covers.word);
+    this.allTogglesWord = validateAllTogglesScope(raw.scopes, this.allCoversWord, aliasIndex, verbIndex, entities);
+    this.allTogglesLabel = this.allTogglesWord === undefined ? '' : raw.scopes.all_toggles!.word.trim();
     this.helpTemplate = raw.messages?.help ?? DEFAULT_HELP_TEMPLATE;
   }
 
@@ -220,6 +239,7 @@ export class AliasTable {
       ['{rooms}', this.displayNames('cover').join(' · ')],
       ['{lights}', this.displayNames('light').join(' · ')],
       ['{switches}', this.displayNames('switch').join(' · ')],
+      ['{all}', this.allTogglesLabel],
     ];
     return this.helpTemplate
       .split('\n')
@@ -258,6 +278,17 @@ export class AliasTable {
   }
 
   /**
+   * Devices the all-toggles scope acts on, in config order: `off` = every light
+   * and switch; `on` = every light plus only switches opted in with `all_on`
+   * (a remotely powered socket or fan is a hazard). Never covers.
+   */
+  toggleEntityIds(verb: 'on' | 'off'): string[] {
+    return [...this.entities.values()]
+      .filter((e) => e.type === 'light' || (e.type === 'switch' && (verb === 'off' || e.allOn === true)))
+      .map((e) => e.entityId);
+  }
+
+  /**
    * Returns the canonical (display) alias names for use in user-facing replies such
    * as entity-unknown and ambiguous messages (item 10). The alias index is keyed by
    * normalized form; we return the original alias strings from each EntityDef so the
@@ -290,6 +321,51 @@ function assertValidPosition(value: number | undefined, canonical: string, field
 /** Same 0–100 integer constraint as a position, used for tolerance bands. */
 function assertValidPercent(value: number | undefined, canonical: string, field: string): void {
   assertValidPosition(value, canonical, field);
+}
+
+const KNOWN_SCOPES: ReadonlySet<string> = new Set(['all_covers', 'all_toggles']);
+
+/**
+ * Validate the optional all-toggles scope and return its normalized word. The word
+ * must be unambiguous: not a device alias, not a verb variant or a prefix match of
+ * one (`resolveVerb` prefix-matches), not the all-covers word, not a reserved word,
+ * and at least two letters after normalization.
+ */
+function validateAllTogglesScope(
+  scopes: RawAliasFile['scopes'],
+  allCoversWord: string,
+  aliasIndex: ReadonlyMap<string, EntityDef>,
+  verbIndex: ReadonlyMap<string, Verb>,
+  entities: ReadonlyMap<string, EntityDef>,
+): string | undefined {
+  for (const key of Object.keys(scopes)) {
+    if (!KNOWN_SCOPES.has(key)) {
+      throw new Error(`Alias table invalid: unknown scope "${key}" under scopes`);
+    }
+  }
+  if (!('all_toggles' in scopes)) return undefined;
+  if (scopes.all_toggles === null || typeof scopes.all_toggles !== 'object') {
+    throw new Error('Alias table invalid: scopes.all_toggles must contain a word');
+  }
+
+  const raw = scopes.all_toggles.word;
+  const word = normalize(typeof raw === 'string' ? raw : '');
+  const fail = (why: string): never => {
+    throw new Error(`Alias table invalid: scopes.all_toggles.word "${raw}" ${why}`);
+  };
+  if (word.length < 2) fail('must be at least two letters');
+  // The parser matches the scope as a single whole-target token.
+  if (word.includes(' ')) fail('must be a single word');
+  if (word === allCoversWord) fail('is the all_covers word');
+  if ([...RESERVED_WORDS].some((w) => normalize(w) === word)) fail('is a reserved word');
+  if (aliasIndex.has(word)) fail('is a device alias');
+  for (const variant of verbIndex.keys()) {
+    if (variant.startsWith(word) || word.startsWith(variant)) fail('collides with a verb');
+  }
+  if (![...entities.values()].some((e) => e.type === 'light' || e.type === 'switch')) {
+    fail('has no lights or switches to act on');
+  }
+  return word;
 }
 
 /** Reject a malformed HA entity id before it reaches a request URL or body. */

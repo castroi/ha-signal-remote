@@ -7,6 +7,35 @@ import { parseCommand } from './parse.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const aliases = loadAliasTable(resolve(here, '../../config/aliases.example.yaml'));
 
+describe('parseCommand — all-toggles scope (הכל)', () => {
+  it.each([
+    ['כבה הכל', 'off'],
+    ['הדלק את הכל', 'on'],
+    ['כבה כל', 'off'],
+    ['פתח הכל', 'open'],
+  ])('%s → all-toggles (%s)', (text, verb) => {
+    expect(parseCommand(text, aliases)).toEqual({ kind: 'command', verb, scope: { type: 'all-toggles' } });
+  });
+
+  it.each(['כבה את כל האורות', 'כבה את כל האורות בסלון', 'כבה סלון כל', 'כבה הכל עכשיו'])(
+    '%s never expands to everything',
+    (text) => {
+      const r = parseCommand(text, aliases);
+      expect(r.kind === 'command' && r.scope.type === 'all-toggles').toBe(false);
+    },
+  );
+
+  it('הכל alone is not a command or control reply (menu)', () => {
+    expect(parseCommand('הכל', aliases).kind).toBe('no-verb');
+  });
+
+  it('without the scope configured, הכל is an unknown target', () => {
+    const noScope = loadAliasTable(resolve(here, '../app/__fixtures__/no-entities.yaml'));
+    expect(noScope.allTogglesWord).toBeUndefined();
+    expect(parseCommand('פתח הכל', noScope).kind).toBe('entity-unknown'); // fixture verbs: פתח/סגור
+  });
+});
+
 describe('parseCommand (design §4 failure taxonomy)', () => {
   it('resolves a single-entity cover command', () => {
     const r = parseCommand('סגור את הסלון', aliases);

@@ -102,7 +102,26 @@ export type Effect =
       timedOut: string[];
     }
   /** `preset`: at least one device moves to a configured position, not fully. */
-  | { kind: 'reply-confirm-prompt'; commandId: string; count: number; verb: Verb; preset: boolean };
+  | {
+      kind: 'reply-confirm-prompt';
+      commandId: string;
+      count: number;
+      verb: Verb;
+      preset: boolean;
+      scope: BatchScope;
+    };
+
+/** Which confirm-gated scope a batch came from. */
+export type BatchScope = 'all-covers' | 'all-toggles';
+
+/** What the bridge needs about a pending batch when its כן arrives. */
+export interface BatchInfo {
+  readonly scope: BatchScope;
+  /** Envelope timestamp of the command that created the batch (sender's clock). */
+  readonly submittedAt: number | undefined;
+  /** True when this batch replaced the sender's earlier pending confirm. */
+  readonly supersedes: boolean;
+}
 
 interface CommandRecord {
   readonly commandId: string;
@@ -118,6 +137,8 @@ interface CommandRecord {
   confirmDeadline: number | undefined;
   /** When the record reached a terminal state (for `prune()`). */
   resolvedAt: number | undefined;
+  /** Set for confirm-gated batches only. */
+  batch: BatchInfo | undefined;
 }
 
 export interface StateMachineOptions {
@@ -140,6 +161,10 @@ interface SubmitAllArgs {
   readonly sourceUuid: string;
   readonly verb: Verb;
   readonly entities: EntityRef[];
+  /** Defaults to 'all-covers'. */
+  readonly scope?: BatchScope;
+  readonly submittedAt?: number;
+  readonly supersedes?: boolean;
 }
 
 export class CommandStateMachine {
@@ -165,6 +190,11 @@ export class CommandStateMachine {
     return rec?.state === 'issued' && rec.outcomes.get(entityId) === 'pending';
   }
 
+  /** Scope and supersede facts of a confirm-gated batch; undefined otherwise. */
+  batchOf(commandId: string): BatchInfo | undefined {
+    return this.commands.get(commandId)?.batch;
+  }
+
   /** The devices a command targets (e.g. to snapshot them before a confirm issues). */
   entityIdsOf(commandId: string): string[] {
     return this.commands.get(commandId)?.entities.map((e) => e.entityId) ?? [];
@@ -183,7 +213,9 @@ export class CommandStateMachine {
   /** A batch command: enters pending_confirm with a stated consequence. */
   submitAll(args: SubmitAllArgs): Effect[] {
     const rec = this.newRecord(args.commandId, args.sourceUuid, args.verb, args.entities);
+    const scope = args.scope ?? 'all-covers';
     rec.confirmDeadline = this.now() + this.confirmExpiryMs;
+    rec.batch = { scope, submittedAt: args.submittedAt, supersedes: args.supersedes ?? false };
     this.commands.set(args.commandId, rec);
     return [
       {
@@ -192,6 +224,7 @@ export class CommandStateMachine {
         count: args.entities.length,
         verb: args.verb,
         preset: args.entities.some((e) => e.target !== undefined),
+        scope,
       },
     ];
   }
@@ -231,6 +264,7 @@ export class CommandStateMachine {
       completionDeadlines: new Map(),
       confirmDeadline: undefined,
       resolvedAt: undefined,
+      batch: undefined,
     };
   }
 

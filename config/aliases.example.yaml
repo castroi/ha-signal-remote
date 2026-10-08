@@ -57,16 +57,21 @@ entities:
     entity_id: switch.fan
     completion_timeout_ms: 5000
     aliases: ["מאוורר"]
+    all_on: true            # "הדלק הכל" may turn this switch on (opt-in, switches only)
   garden_socket:
     type: switch
     entity_id: switch.garden_socket
     completion_timeout_ms: 5000
-    aliases: ["שקע"]
+    aliases: ["שקע"]        # no all_on: "הדלק הכל" never powers this socket
 
 scopes:
   all_covers:
     word: "תריסים"
     expands_to_type: cover
+  # Optional. "כבה הכל" turns off every light and switch; "הדלק הכל" turns on every
+  # light plus switches marked all_on. Both ask כן/לא first. Covers are never included.
+  all_toggles:
+    word: "הכל"
 
 # IMPORTANT: these scripts MUST themselves refuse to move a cover in the wrong
 # direction (e.g. a close-to-30 on a cover already at 20). For a single-cover

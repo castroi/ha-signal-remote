@@ -1422,10 +1422,12 @@ describe('per-device completion through the bridge', () => {
     failCover?: string;
     states?: ReadonlyMap<string, EntitySnapshot>;
     audit?: AuditLogger;
+    skewMs?: number;
   } = {}) {
     const nowRef = { t: 1_000_000 };
     const sends: string[] = [];
     const coverCalls: { entityId: string; verb: string }[] = [];
+    const toggleCalls: { entityId: string; verb: string }[] = [];
     const bridge = new Bridge({
       config: testConfig(),
       now: () => nowRef.t,
@@ -1438,18 +1440,23 @@ describe('per-device completion through the bridge', () => {
           coverCalls.push({ entityId, verb });
           return entityId === opts.failCover ? ({ ok: false, reason: 'failed' } as const) : ({ ok: true } as const);
         }),
-        callToggle: vi.fn(async () => ({ ok: true }) as const),
+        callToggle: vi.fn(async (_domain: string, entityId: string, verb: string) => {
+          toggleCalls.push({ entityId, verb });
+          return { ok: true } as const;
+        }),
       },
       signal: { send: vi.fn(async (_u: string, _n: string, m: string) => { sends.push(m); return true; }) },
-      clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
+      clock: {
+        snapshot: () => ({ skewSampleMs: opts.skewMs ?? 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }),
+      },
     });
     bridge.onWsConnected();
     nowRef.t += 11_000;
-    const say = async (message: string) => {
+    const say = async (message: string, sourceUuid = 'u1', timestamp?: number) => {
       nowRef.t += 1;
-      await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message });
+      await bridge.handleEnvelope({ sourceUuid, sourceNumber: '+1', timestamp: timestamp ?? nowRef.t, message });
     };
-    return { bridge, sends, coverCalls, nowRef, say };
+    return { bridge, sends, coverCalls, toggleCalls, nowRef, say };
   }
 
   it('G: a light already in the target state acks immediately', async () => {
@@ -1657,6 +1664,206 @@ describe('per-device completion through the bridge', () => {
     h.nowRef.t += 10 * 60_000 + 1;
     await h.bridge.tick();
     expect(replyTo.size).toBe(0);
+  });
+
+  describe('הכל scope (all lights + switches)', () => {
+    const OFF_SET = ['light.garden', 'switch.fan', 'switch.garden_socket'];
+
+    it.each([
+      ['כבה הכל', 'לכבות את כל 3 האורות והמתגים? כן/לא'],
+      ['הדלק הכל', 'להדליק את כל 2 האורות והמתגים? כן/לא'],
+    ])('%s prompts "%s"', async (command, prompt) => {
+      const h = batchHarness();
+      await h.say(command);
+      expect(h.sends.at(-1)).toBe(prompt);
+      expect(h.toggleCalls).toHaveLength(0);
+    });
+
+    it('כבה הכל + כן turns off every light and switch, never a cover, with one summary', async () => {
+      const h = batchHarness();
+      await h.say('כבה הכל');
+      await h.say('כן');
+      expect(h.toggleCalls).toEqual(OFF_SET.map((entityId) => ({ entityId, verb: 'off' })));
+      expect(h.coverCalls).toHaveLength(0);
+      expect(h.sends.filter((m) => m === 'מבצע…')).toHaveLength(1);
+      for (const id of OFF_SET) await h.bridge.onStateChanged(id, 'off');
+      expect(h.sends.at(-1)).toBe('בוצע');
+    });
+
+    it('devices already off are done without an HA call', async () => {
+      const h = batchHarness({ states: new Map([['light.garden', { state: 'off' }]]) });
+      await h.say('כבה הכל');
+      await h.say('כן');
+      expect(h.toggleCalls.map((c) => c.entityId)).toEqual(['switch.fan', 'switch.garden_socket']);
+      await h.bridge.onStateChanged('switch.fan', 'off');
+      await h.bridge.onStateChanged('switch.garden_socket', 'off');
+      expect(h.sends.at(-1)).toBe('בוצע');
+    });
+
+    it('הדלק הכל + כן turns on lights and only all_on switches', async () => {
+      const h = batchHarness();
+      await h.say('הדלק הכל');
+      await h.say('כן');
+      expect(h.toggleCalls).toEqual([
+        { entityId: 'light.garden', verb: 'on' },
+        { entityId: 'switch.fan', verb: 'on' },
+      ]);
+    });
+
+    it('works while the clock is unhealthy (covers would be refused)', async () => {
+      const h = batchHarness({ skewMs: 120_000 });
+      await h.say('כבה הכל');
+      await h.say('כן');
+      expect(h.toggleCalls).toHaveLength(3);
+    });
+
+    it('is refused while the HA WebSocket is down, at submit and at כן', async () => {
+      const h = batchHarness();
+      h.bridge.onWsDisconnected();
+      await h.say('כבה הכל');
+      expect(h.sends.at(-1)).toBe('אין כרגע מעקב מצב, נסה שוב בעוד רגע');
+
+      const h2 = batchHarness();
+      await h2.say('כבה הכל');
+      h2.bridge.onWsDisconnected();
+      await h2.say('כן');
+      expect(h2.sends.at(-1)).toBe('אין כרגע מעקב מצב, נסה שוב בעוד רגע');
+      expect(h2.toggleCalls).toHaveLength(0);
+    });
+
+    it('the kill switch refuses it, also between prompt and כן', async () => {
+      const h = batchHarness();
+      await h.say('כבה הכל');
+      h.bridge.engageKill();
+      await h.say('כן');
+      expect(h.sends.at(-1)).toBe('המערכת בכיבוי חירום');
+      expect(h.toggleCalls).toHaveLength(0);
+    });
+
+    it.each(['פתח הכל', 'עצור הכל', 'העלה הכל'])('%s is rejected: only הדלק / כבה', async (command) => {
+      const lines: string[] = [];
+      const h = batchHarness({ audit: new AuditLogger({ salt: 's', sink: (l) => lines.push(l) }) });
+      await h.say(command);
+      expect(h.sends.at(-1)).toBe('"הכל" עובד רק עם הדלק / כבה');
+      expect(h.toggleCalls).toHaveLength(0);
+      expect(h.coverCalls).toHaveLength(0);
+      expect(lines.map((l) => JSON.parse(l) as AuditEvent)).toContainEqual(
+        expect.objectContaining({ result: 'rejected', reasonCode: 'unsupported-verb' }),
+      );
+    });
+
+    it('a second הכל within 60s is refused — per sender and globally', async () => {
+      const h = batchHarness();
+      await h.say('כבה הכל');
+      await h.say('לא');
+      await h.say('כבה הכל');
+      expect(h.sends.at(-1)).toBe('יותר מדי פקודות, נסה עוד רגע');
+      await h.say('הדלק הכל', 'u2');
+      expect(h.sends.at(-1)).toBe('יותר מדי פקודות, נסה עוד רגע');
+      h.nowRef.t += 60_001;
+      await h.say('כבה הכל');
+      expect(h.sends.at(-1)).toContain('כן/לא');
+    });
+
+    it('a הכל prompt and a תריסים prompt supersede each other (audited)', async () => {
+      const lines: string[] = [];
+      const h = batchHarness({ audit: new AuditLogger({ salt: 's', sink: (l) => lines.push(l) }) });
+      await h.say('סגור תריסים');
+      await h.say('כבה הכל');
+      await h.say('כן');
+      expect(h.toggleCalls).toHaveLength(3);
+      expect(h.coverCalls).toHaveLength(0);
+      expect(lines.map((l) => JSON.parse(l) as AuditEvent)).toContainEqual(
+        expect.objectContaining({ result: 'rejected', reasonCode: 'superseded' }),
+      );
+
+      const h2 = batchHarness();
+      await h2.say('כבה הכל');
+      await h2.say('סגור תריסים');
+      await h2.say('כן');
+      expect(h2.coverCalls.filter((c) => c.verb === 'close')).toHaveLength(4);
+      expect(h2.toggleCalls).toHaveLength(0);
+    });
+
+    it('after a supersede, a כן sent before the new prompt is refused; a later one confirms', async () => {
+      const h = batchHarness();
+      await h.say('סגור תריסים');
+      const yesForCovers = h.nowRef.t + 1; // typed for the covers prompt…
+      await h.say('הדלק הכל'); // …but הדלק הכל (later timestamp) arrived first
+      await h.say('כן', 'u1', yesForCovers);
+      expect(h.sends.at(-1)).toBe('הבקשה השתנתה, שלח כן שוב');
+      expect(h.toggleCalls).toHaveLength(0);
+      expect(h.coverCalls).toHaveLength(0);
+      await h.say('כן');
+      expect(h.toggleCalls).toHaveLength(2);
+    });
+
+    it('a כן stamped strictly before the superseding command is refused too', async () => {
+      const h = batchHarness();
+      await h.say('סגור תריסים');
+      const early = h.nowRef.t; // the covers prompt's own timestamp
+      await h.say('כבה הכל');
+      await h.say('כן', 'u1', early + 0.5);
+      expect(h.sends.at(-1)).toBe('הבקשה השתנתה, שלח כן שוב');
+    });
+
+    it('an expired earlier prompt is not counted as superseded', async () => {
+      const lines: string[] = [];
+      const h = batchHarness({ audit: new AuditLogger({ salt: 's', sink: (l) => lines.push(l) }) });
+      await h.say('סגור תריסים');
+      h.nowRef.t += 21_000;
+      await h.bridge.tick(); // the covers prompt expires
+      const late = h.nowRef.t + 1;
+      await h.say('כבה הכל');
+      expect(lines.map((l) => JSON.parse(l) as AuditEvent).some((e) => e.reasonCode === 'superseded')).toBe(false);
+      await h.say('כן', 'u1', late); // equal timestamp, but no supersede → confirms
+      expect(h.toggleCalls).toHaveLength(3);
+    });
+
+    it('הדלק הכל with nothing to turn on is refused without using the 60s window', async () => {
+      const cfg = loadConfig({
+        aliasPath: resolve(here, '__fixtures__/switches-only.yaml'),
+        env: testConfigEnv,
+      });
+      const nowRef = { t: 1_000_000 };
+      const sends: string[] = [];
+      const bridge = new Bridge({
+        config: cfg,
+        now: () => nowRef.t,
+        haRest: {
+          ...noPositionPort,
+          callCover: vi.fn(async () => ({ ok: true }) as const),
+          callToggle: vi.fn(async () => ({ ok: true }) as const),
+        },
+        signal: { send: vi.fn(async (_u: string, _n: string, m: string) => { sends.push(m); return true; }) },
+        clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
+      });
+      bridge.onWsConnected();
+      nowRef.t += 11_000;
+      await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message: 'הדלק הכל' });
+      expect(sends.at(-1)).toBe('אין אורות או מתגים להדלקה');
+      nowRef.t += 1;
+      await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message: 'כבה הכל' });
+      expect(sends.at(-1)).toBe('לכבות את כל 1 האורות והמתגים? כן/לא');
+    });
+
+    it('a sender refused by the global window is free again once it passes', async () => {
+      const h = batchHarness();
+      await h.say('כבה הכל'); // u1 at t
+      h.nowRef.t += 59_000;
+      await h.say('כבה הכל', 'u2'); // refused globally
+      expect(h.sends.at(-1)).toBe('יותר מדי פקודות, נסה עוד רגע');
+      h.nowRef.t += 1_001; // 60s after u1's
+      await h.say('כבה הכל', 'u2');
+      expect(h.sends.at(-1)).toContain('כן/לא');
+    });
+
+    it('without a supersede, the timestamp check does not apply', async () => {
+      const h = batchHarness();
+      await h.say('כבה הכל');
+      await h.say('כן');
+      expect(h.toggleCalls).toHaveLength(3);
+    });
   });
 
   it('audit: one summary event plus one per failed/timed-out device, no names', async () => {

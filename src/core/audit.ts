@@ -46,7 +46,13 @@ export type AuditReasonCode =
   | 'position-unknown'
   | 'noop-already-there'
   // The single summary event of a finished multi-device command.
-  | 'summary';
+  | 'summary'
+  // A verb the scope does not support (e.g. "פתח הכל").
+  | 'unsupported-verb'
+  // A scope that resolves to no devices for this verb (e.g. "הדלק הכל", no all_on).
+  | 'nothing-to-do'
+  // A pending confirm replaced by a newer batch, or a כן meant for the replaced one.
+  | 'superseded';
 
 export interface AuditEvent {
   readonly ts: number;

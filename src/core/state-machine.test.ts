@@ -535,9 +535,31 @@ describe('CommandStateMachine — per-device completion', () => {
   it('the confirm prompt carries the verb', () => {
     const sm = machine();
     const p = sm.submitAll({ commandId: 'b12', sourceUuid: 'u1', verb: 'open', entities: [COVER, COVER2] });
-    expect(p).toEqual([{ kind: 'reply-confirm-prompt', commandId: 'b12', count: 2, verb: 'open', preset: false }]);
+    expect(p).toEqual([
+      { kind: 'reply-confirm-prompt', commandId: 'b12', count: 2, verb: 'open', preset: false, scope: 'all-covers' },
+    ]);
     const q = sm.submitAll({ commandId: 'b12p', sourceUuid: 'u1', verb: 'close', entities: [COVER_TO_30, COVER2] });
-    expect(q).toEqual([{ kind: 'reply-confirm-prompt', commandId: 'b12p', count: 2, verb: 'close', preset: true }]);
+    expect(q).toEqual([
+      { kind: 'reply-confirm-prompt', commandId: 'b12p', count: 2, verb: 'close', preset: true, scope: 'all-covers' },
+    ]);
+  });
+
+  it('a batch records its scope and supersede facts for the confirm-time checks', () => {
+    const sm = machine();
+    const p = sm.submitAll({
+      commandId: 'b16',
+      sourceUuid: 'u1',
+      verb: 'off',
+      entities: [LIGHT, SWITCH],
+      scope: 'all-toggles',
+      submittedAt: 5_000,
+      supersedes: true,
+    });
+    expect(p).toEqual([
+      { kind: 'reply-confirm-prompt', commandId: 'b16', count: 2, verb: 'off', preset: false, scope: 'all-toggles' },
+    ]);
+    expect(sm.batchOf('b16')).toEqual({ scope: 'all-toggles', submittedAt: 5_000, supersedes: true });
+    expect(sm.batchOf('missing')).toBeUndefined();
   });
 
   it('F: finished records are pruned 10 minutes after they resolve; live ones never', () => {

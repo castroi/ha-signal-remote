@@ -66,3 +66,32 @@ describe('RateLimiter (design §5, go-live gate 7)', () => {
     expect(rl.allowConfirm('s2').allowed).toBe(true);
   });
 });
+
+describe('RateLimiter — all-toggles scope (1 prompt per 60s across all senders)', () => {
+  it('allows one, refuses the next within 60s, then frees up', () => {
+    let now = 0;
+    const rl = new RateLimiter({ tunables: t, now: () => now });
+    expect(rl.allowAllToggles().allowed).toBe(true);
+    now += 59_999;
+    expect(rl.allowAllToggles()).toEqual({ allowed: false, reason: 'rate-limited' });
+    now += 2;
+    expect(rl.allowAllToggles().allowed).toBe(true);
+  });
+
+  it('a refused call does not extend the window', () => {
+    let now = 0;
+    const rl = new RateLimiter({ tunables: t, now: () => now });
+    rl.allowAllToggles();
+    now = 59_000;
+    expect(rl.allowAllToggles().allowed).toBe(false);
+    now = 60_001;
+    expect(rl.allowAllToggles().allowed).toBe(true);
+  });
+
+  it('is separate from the normal command caps', () => {
+    const now = 0;
+    const rl = new RateLimiter({ tunables: t, now: () => now });
+    expect(rl.allowAllToggles().allowed).toBe(true);
+    for (let i = 0; i < 5; i++) expect(rl.allowCommand('s1').allowed).toBe(true);
+  });
+});
