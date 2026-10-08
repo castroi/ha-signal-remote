@@ -203,6 +203,11 @@ concurrent operations are unambiguous.
 - **Shared-daemon compromise**: Pi forces one signal-cli for this bot and the train bot.
   Harden the train container to **this** bot's standard, since it is now adjacent to house
   control.
+- **Status disclosure**: `סטטוס` returns live device states (cover positions, light/switch
+  on/off) — occupancy signal. Sent 1:1 to allowlisted senders only, but it lands in Signal
+  history and notifications on every allowlisted device. HA's state body is untrusted:
+  only fixed Hebrew words and validated 0–100 positions are rendered. Reads are per-entity,
+  single-flight and cached 3s so un-rate-limited status cannot amplify load on HA.
 - **Audit log (privacy-safe)**: timestamp, salted UUID hash, normalized intent, entity,
   result, latency, failure/reason code. No raw body by default. Salt policy (stable vs
   rotating) decided explicitly.
