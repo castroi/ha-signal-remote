@@ -116,11 +116,14 @@ entities:
     entity_id: switch.fan
     completion_timeout_ms: 5000
     aliases: ["מאוורר"]
+    all_on: true           # optional, switches only: "הדלק הכל" may turn it on
 
 scopes:
   all_covers:
     word: "תריסים"
     expands_to_type: cover
+  all_toggles:             # optional: enables "כבה הכל" / "הדלק הכל"
+    word: "הכל"
 
 # The HA scripts the bridge calls to drive covers to a preset position.
 position_scripts:
@@ -139,12 +142,25 @@ that would reverse direction** (e.g. a `close_to 30` on a cover already at 20) �
 "already there" rather than moving the wrong way. A preset verb on a cover with no configured
 target for that direction falls back to full open/close.
 
+**All lights and switches (`scopes.all_toggles`).** Optional. With it, `כבה הכל` turns off
+every light and switch, and `הדלק הכל` turns on every light plus only the switches marked
+`all_on: true` — a remotely powered socket or fan is a physical hazard, so switches must opt
+in. Covers are never included. Both ask `כן`/`לא` first, are refused while the HA WebSocket is
+down (no state tracking), and are limited to one prompt per 60s for the whole household (a
+cancelled or expired prompt counts too). The scope
+word must be the whole target (`כבה הכל`, `הדלק את הכל`; also `כבה כל`, since a leading ה is
+normalized away) — it never matches inside a longer phrase such as `כבה את כל האורות בסלון`.
+The word is validated at load: it may not be a device alias, a verb (or a prefix match of
+one), the `תריסים` word or a reserved word, and the config must contain at least one light or
+switch.
+
 **Help text (`messages.help`).** The `עזרה` / `תפריט` reply is configurable in the same file
 under an optional `messages.help` block — edit it freely with no code change. The `{rooms}`,
 `{lights}` and `{switches}` placeholders are filled at send time from the first alias of each
-configured cover / light / switch entity, so the listed devices never drift from the table; a
-line whose placeholder resolves to empty (e.g. a deployment with no lights or no switches) is
-dropped. If `messages.help` is absent, a built-in default is used.
+configured cover / light / switch entity, so the listed devices never drift from the table, and
+`{all}` with the `all_toggles` word; a line whose placeholder resolves to empty (e.g. a
+deployment with no lights, no switches, or no `all_toggles` scope) is dropped. If
+`messages.help` is absent, a built-in default is used.
 
 ---
 
@@ -158,11 +174,12 @@ A message is `verb + entity`, e.g. `סגור סלון` (close salon) or `פתח 
 | `העלה` / `הנמך` | Open / close a cover **to its configured preset position** (words are configurable) |
 | `הדלק` / `כבה` | Turn a light **or switch** on / off |
 | `תריסים` | All-covers scope — prompts a context-bound `כן`/`לא` confirmation (20s expiry) before acting |
-| `כן` / `לא` | Yes / No — confirm or cancel a pending all-covers action |
+| `כבה הכל` / `הדלק הכל` | All lights and switches (on: lights + `all_on` switches) — needs `scopes.all_toggles`; prompts `כן`/`לא` like `תריסים` |
+| `כן` / `לא` | Yes / No — confirm or cancel a pending all-covers / all-toggles action |
 | `סטטוס` | Status — always answered for authorized senders: WS / clock / kill-switch / covers-enabled state, then every configured device (covers as position %, lights/switches as on/off; `לא זמין` when unreadable) |
 | `עזרה`, `תפריט` | Help / menu |
 
-Cover feedback is two-stage (`מבצע…` then completion); lights and switches are single-stage. A command that exceeds its per-entity `completion_timeout_ms` returns a timeout + manual-check reply — never a false success. Sending a new command for a cover already in motion preempts it (stop, then the new direction).
+Cover feedback is two-stage (`מבצע…` then completion); a single light or switch is single-stage. A confirmed batch (`תריסים`, `הכל`) sends one `מבצע…` and, once every device has finished or timed out, one summary naming any device that didn't (`בוצע, חוץ מ: …`). A command that exceeds its per-entity `completion_timeout_ms` returns a timeout + manual-check reply — never a false success; a device already in the target state counts as done at once. Sending a new command for a device already in motion preempts it there (covers: stop, then the new direction).
 
 ---
 

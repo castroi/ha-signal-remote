@@ -81,7 +81,10 @@ prefixes, collapse whitespace.
 - **Verbs**: open / close / stop (covers), on / off (lights), with Hebrew variants.
 - **Entities**: room aliases (סלון, מטבח, חדר ילדים, חדר הורים) and light aliases (גינה),
   mapping household speech → HA entity_ids (e.g. סלון → `cover.living_room`).
-- **Scope**: bare `תריסים` = all covers.
+- **Scope**: bare `תריסים` = all covers. Optional `הכל` (`scopes.all_toggles`) = all lights
+  and switches — `כבה הכל` turns off every light and switch, `הדלק הכל` turns on lights plus
+  only switches opted in with `all_on`. Confirm-gated like `תריסים`; matches only as the whole
+  target; never includes covers.
 
 Failure taxonomy (three distinct replies, never one generic error):
 1. **No verb / gibberish** → menu fallback card.
@@ -208,6 +211,14 @@ concurrent operations are unambiguous.
   history and notifications on every allowlisted device. HA's state body is untrusted:
   only fixed Hebrew words and validated 0–100 positions are rendered. Reads are per-entity,
   single-flight and cached 3s so un-rate-limited status cannot amplify load on HA.
+- **All lights and switches (`הכל`)**: one message can power every light and switch, so it is
+  confirm-gated, matched only as the entire target (never inside a sentence), limited to
+  1 prompt per 60s across all senders, and refused while the HA WebSocket is down. `הדלק הכל`
+  turns on switches only when opted in with `all_on` (a remotely powered socket/fan is a
+  hazard). After a newer batch replaces a pending prompt, a `כן` stamped before that newer
+  command (i.e. one that arrived out of order) is refused instead of confirming the new batch.
+  A `כן` sent after the newer command still confirms it — the prompt text names the action
+  (`לכבות את כל N האורות והמתגים?`) so the user sees what they confirm.
 - **Audit log (privacy-safe)**: timestamp, salted UUID hash, normalized intent, entity,
   result, latency, failure/reason code. No raw body by default. Salt policy (stable vs
   rotating) decided explicitly.
