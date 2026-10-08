@@ -9,19 +9,18 @@ import type { EntitySnapshot } from '../core/status.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const aliasPath = resolve(here, '../../config/aliases.example.yaml');
 
+const testConfigEnv = {
+  HA_TOKEN: 'tok',
+  HA_BASE_URL: 'http://localhost:8123',
+  SIGNAL_API_URL: 'http://localhost:8080',
+  SIGNAL_TOKEN: 'wrapper-token',
+  BOT_NUMBER: '+1555',
+  ALLOWLIST_UUIDS: 'u1',
+  AUDIT_SALT: 'salt',
+};
+
 function testConfig(): Config {
-  return loadConfig({
-    aliasPath,
-    env: {
-      HA_TOKEN: 'tok',
-      HA_BASE_URL: 'http://localhost:8123',
-      SIGNAL_API_URL: 'http://localhost:8080',
-      SIGNAL_TOKEN: 'wrapper-token',
-      BOT_NUMBER: '+1555',
-      ALLOWLIST_UUIDS: 'u1',
-      AUDIT_SALT: 'salt',
-    },
-  });
+  return loadConfig({ aliasPath, env: testConfigEnv });
 }
 
 // Default stubs for the preset-only and status-only port methods; other tests never hit them.
@@ -264,7 +263,6 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
     });
 
     it('still sends the health line when the read rejects, without leaking the error', async () => {
-      const auditLines: string[] = [];
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       try {
@@ -273,7 +271,7 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
         });
         await h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
         expect(h.sends[0]!.message).toMatch(/^מצב: .*\n\nמצב מכשירים לא זמין$/);
-        const logged = [...errSpy.mock.calls, ...logSpy.mock.calls, auditLines].flat().join(' ');
+        const logged = [...errSpy.mock.calls, ...logSpy.mock.calls].flat().join(' ');
         expect(logged).not.toContain('tok');
         expect(logged).not.toContain('8123');
         expect(logged).not.toContain('body');
@@ -294,11 +292,47 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
       const a = h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
       h.nowRef.t += 1; // distinct timestamp so dedup doesn't drop the second
       const b = h.bridge.handleEnvelope(envelope('סטטוס', h.nowRef));
+      // Both requests are now waiting and no snapshot is cached yet, so only the
+      // in-flight share (not the 3s cache) can keep this at one read.
+      await new Promise((r) => setImmediate(r));
+      expect(getStates).toHaveBeenCalledTimes(1);
       release();
       await Promise.all([a, b]);
       expect(getStates).toHaveBeenCalledTimes(1);
       expect(h.sends).toHaveLength(2);
       expect(h.sends.every((s) => s.message.includes('סלון 20%'))).toBe(true);
+    });
+
+    it('sends only the health line when no entities are configured', async () => {
+      const getStates = vi.fn(allOpen);
+      const sends: string[] = [];
+      const nowRef = { t: 1_000_000 };
+      const bridge = new Bridge({
+        config: loadConfig({
+          aliasPath: resolve(here, '__fixtures__/no-entities.yaml'),
+          env: testConfigEnv,
+        }),
+        now: () => nowRef.t,
+        haRest: {
+          ...noPositionPort,
+          getStates,
+          callCover: vi.fn(async () => ({ ok: true }) as const),
+          callToggle: vi.fn(async () => ({ ok: true }) as const),
+        },
+        signal: {
+          send: vi.fn(async (_u: string, _n: string, message: string) => {
+            sends.push(message);
+            return true;
+          }),
+        },
+        clock: {
+          snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }),
+        },
+      });
+      await bridge.handleEnvelope(envelope('סטטוס', nowRef));
+      expect(getStates).not.toHaveBeenCalled();
+      expect(sends).toHaveLength(1);
+      expect(sends[0]).toMatch(/^מצב: [^\n]*$/);
     });
 
     it('caches the snapshot for 3s, then reads again', async () => {

@@ -852,6 +852,7 @@ export class Bridge {
     for (const e of this.cfg.aliases.entities.values()) {
       entities.push({ name: e.aliases[0] ?? e.canonical, type: e.type, entityId: e.entityId });
     }
+    if (entities.length === 0) return health;
     let snapshots: ReadonlyMap<string, EntitySnapshot> | undefined;
     try {
       snapshots = await this.deviceSnapshot(entities.map((e) => e.entityId));
