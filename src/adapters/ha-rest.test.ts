@@ -131,6 +131,106 @@ describe('HaRestClient (design §7, §6 A02/A03)', () => {
     });
   });
 
+  describe('getStates', () => {
+    const stateBody = (state: unknown, attributes: Record<string, unknown> = {}) =>
+      new Response(JSON.stringify({ state, attributes }), { status: 200 });
+
+    it('GETs each id from the state endpoint with the bearer token', async () => {
+      const calls: { url: string; init: RequestInit }[] = [];
+      const fetchImpl = mockFetch((url, init) => {
+        calls.push({ url, init });
+        return stateBody('on');
+      });
+      const client = new HaRestClient({ ...baseOpts, fetchImpl });
+      await client.getStates(['light.a', 'switch.b']);
+      expect(calls.map((c) => c.url).sort()).toEqual([
+        'http://localhost:8123/api/states/light.a',
+        'http://localhost:8123/api/states/switch.b',
+      ]);
+      for (const c of calls) {
+        expect(c.init.method ?? 'GET').toBe('GET');
+        expect((c.init.headers as Record<string, string>).authorization).toBe(
+          'Bearer secret-llat',
+        );
+      }
+    });
+
+    it('returns state and an integer 0–100 position keyed by id', async () => {
+      const fetchImpl = mockFetch((url) =>
+        url.endsWith('cover.g') ? stateBody('open', { current_position: 20 }) : stateBody('off'),
+      );
+      const client = new HaRestClient({ ...baseOpts, fetchImpl });
+      const states = await client.getStates(['cover.g', 'switch.fan']);
+      expect(states?.get('cover.g')).toEqual({ state: 'open', position: 20 });
+      expect(states?.get('switch.fan')).toEqual({ state: 'off' });
+    });
+
+    it.each([150, -1, 20.5, Number.NaN, '20', null])(
+      'omits an invalid position (%s)',
+      async (pos) => {
+        const fetchImpl = mockFetch(() => stateBody('open', { current_position: pos }));
+        const client = new HaRestClient({ ...baseOpts, fetchImpl });
+        const states = await client.getStates(['cover.g']);
+        expect(states?.get('cover.g')).toEqual({ state: 'open' });
+      },
+    );
+
+    it('drops an entry whose state is not a string', async () => {
+      const fetchImpl = mockFetch((url) => (url.endsWith('a') ? stateBody(1) : stateBody('on')));
+      const client = new HaRestClient({ ...baseOpts, fetchImpl });
+      const states = await client.getStates(['light.a', 'light.b']);
+      expect(states?.has('light.a')).toBe(false);
+      expect(states?.get('light.b')).toEqual({ state: 'on' });
+    });
+
+    it('omits only the ids that fail (non-2xx, throw, non-JSON)', async () => {
+      const fetchImpl = mockFetch((url) => {
+        if (url.endsWith('bad404')) return new Response('nope', { status: 404 });
+        if (url.endsWith('badthrow')) throw new Error('ECONNREFUSED');
+        if (url.endsWith('badjson')) return new Response('<html>', { status: 200 });
+        return stateBody('on');
+      });
+      const client = new HaRestClient({ ...baseOpts, fetchImpl });
+      const states = await client.getStates([
+        'light.bad404',
+        'light.badthrow',
+        'light.badjson',
+        'light.ok',
+      ]);
+      expect([...(states?.keys() ?? [])]).toEqual(['light.ok']);
+    });
+
+    it('returns undefined when every read fails', async () => {
+      const fetchImpl = mockFetch(() => new Response('nope', { status: 500 }));
+      const client = new HaRestClient({ ...baseOpts, fetchImpl });
+      expect(await client.getStates(['light.a', 'switch.b'])).toBeUndefined();
+    });
+
+    it('aborts a read after 3s even though service calls allow 10s', async () => {
+      vi.useFakeTimers();
+      try {
+        const fetchImpl = mockFetch(
+          (_url, init) =>
+            new Promise<Response>((_resolve, reject) => {
+              init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+            }),
+        );
+        const client = new HaRestClient({ ...baseOpts, fetchImpl });
+        let settled = false;
+        const p = client.getStates(['light.a']).then((r) => {
+          settled = true;
+          return r;
+        });
+        await vi.advanceTimersByTimeAsync(2_999);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await p).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   describe('callPositionScript', () => {
     it('posts script.turn_on with the entity list + position nested under variables', async () => {
       let captured: { url: string; init: RequestInit } | undefined;
