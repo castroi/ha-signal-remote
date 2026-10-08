@@ -125,7 +125,7 @@ interface RawAliasFile {
   >;
   scopes: {
     all_covers: { word: string; expands_to_type: EntityType };
-    all_toggles?: { word: string } | null;
+    all_toggles?: { word: string; min_interval_s?: number } | null;
   };
   position_scripts?: { open: string; close: string; default_tolerance_percent?: number };
   messages?: { help?: string };
@@ -137,6 +137,8 @@ export class AliasTable {
   readonly allTogglesWord: string | undefined;
   /** The scope word as configured (for help text); empty when not configured. */
   private readonly allTogglesLabel: string;
+  /** Minimum time between two confirmed all-toggles actions (any sender); 0 = no limit. */
+  readonly allTogglesMinIntervalMs: number;
   readonly entities: ReadonlyMap<string, EntityDef>;
   readonly positionScripts: PositionScripts | undefined;
   private readonly aliasIndex: ReadonlyMap<string, EntityDef>;
@@ -224,6 +226,8 @@ export class AliasTable {
     this.allCoversWord = normalize(raw.scopes.all_covers.word);
     this.allTogglesWord = validateAllTogglesScope(raw.scopes, this.allCoversWord, aliasIndex, verbIndex, entities);
     this.allTogglesLabel = this.allTogglesWord === undefined ? '' : raw.scopes.all_toggles!.word.trim();
+    this.allTogglesMinIntervalMs =
+      (raw.scopes.all_toggles?.min_interval_s ?? DEFAULT_ALL_TOGGLES_MIN_INTERVAL_S) * 1000;
     this.helpTemplate = raw.messages?.help ?? DEFAULT_HELP_TEMPLATE;
   }
 
@@ -324,6 +328,10 @@ function assertValidPercent(value: number | undefined, canonical: string, field:
 }
 
 const KNOWN_SCOPES: ReadonlySet<string> = new Set(['all_covers', 'all_toggles']);
+const ALL_TOGGLES_KEYS: ReadonlySet<string> = new Set(['word', 'min_interval_s']);
+/** Default minimum time between two confirmed כבה/הדלק הכל actions. */
+const DEFAULT_ALL_TOGGLES_MIN_INTERVAL_S = 10;
+const MAX_ALL_TOGGLES_MIN_INTERVAL_S = 3600;
 
 /**
  * Validate the optional all-toggles scope and return its normalized word. The word
@@ -348,9 +356,20 @@ function validateAllTogglesScope(
     throw new Error('Alias table invalid: scopes.all_toggles must contain a word');
   }
   for (const key of Object.keys(scopes.all_toggles)) {
-    if (key !== 'word') {
-      throw new Error(`Alias table invalid: scopes.all_toggles has unknown key "${key}" (expected: word)`);
+    if (!ALL_TOGGLES_KEYS.has(key)) {
+      throw new Error(
+        `Alias table invalid: scopes.all_toggles has unknown key "${key}" (expected: word, min_interval_s)`,
+      );
     }
+  }
+  const interval = scopes.all_toggles.min_interval_s;
+  if (
+    interval !== undefined &&
+    (!Number.isInteger(interval) || interval < 0 || interval > MAX_ALL_TOGGLES_MIN_INTERVAL_S)
+  ) {
+    throw new Error(
+      `Alias table invalid: scopes.all_toggles.min_interval_s must be an integer 0–${MAX_ALL_TOGGLES_MIN_INTERVAL_S}, got ${String(interval)}`,
+    );
   }
 
   const raw = scopes.all_toggles.word;

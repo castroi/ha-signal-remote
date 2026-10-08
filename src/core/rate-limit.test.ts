@@ -67,31 +67,37 @@ describe('RateLimiter (design §5, go-live gate 7)', () => {
   });
 });
 
-describe('RateLimiter — all-toggles scope (1 prompt per 60s across all senders)', () => {
-  it('allows one, refuses the next within 60s, then frees up', () => {
+describe('RateLimiter — all-toggles scope (one confirmed action per interval, all senders)', () => {
+  it('allows one, refuses the next within the interval, then frees up', () => {
     let now = 0;
     const rl = new RateLimiter({ tunables: t, now: () => now });
-    expect(rl.allowAllToggles().allowed).toBe(true);
-    now += 59_999;
-    expect(rl.allowAllToggles()).toEqual({ allowed: false, reason: 'rate-limited' });
+    expect(rl.allowAllToggles(10_000).allowed).toBe(true);
+    now += 9_999;
+    expect(rl.allowAllToggles(10_000)).toEqual({ allowed: false, reason: 'rate-limited' });
     now += 2;
-    expect(rl.allowAllToggles().allowed).toBe(true);
+    expect(rl.allowAllToggles(10_000).allowed).toBe(true);
   });
 
   it('a refused call does not extend the window', () => {
     let now = 0;
     const rl = new RateLimiter({ tunables: t, now: () => now });
-    rl.allowAllToggles();
-    now = 59_000;
-    expect(rl.allowAllToggles().allowed).toBe(false);
-    now = 60_001;
-    expect(rl.allowAllToggles().allowed).toBe(true);
+    rl.allowAllToggles(10_000);
+    now = 9_000;
+    expect(rl.allowAllToggles(10_000).allowed).toBe(false);
+    now = 10_001;
+    expect(rl.allowAllToggles(10_000).allowed).toBe(true);
+  });
+
+  it('an interval of 0 never limits', () => {
+    const now = 0;
+    const rl = new RateLimiter({ tunables: t, now: () => now });
+    for (let i = 0; i < 5; i++) expect(rl.allowAllToggles(0).allowed).toBe(true);
   });
 
   it('is separate from the normal command caps', () => {
     const now = 0;
     const rl = new RateLimiter({ tunables: t, now: () => now });
-    expect(rl.allowAllToggles().allowed).toBe(true);
+    expect(rl.allowAllToggles(10_000).allowed).toBe(true);
     for (let i = 0; i < 5; i++) expect(rl.allowCommand('s1').allowed).toBe(true);
   });
 });

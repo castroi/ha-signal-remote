@@ -1752,17 +1752,58 @@ describe('per-device completion through the bridge', () => {
       );
     });
 
-    it('a second הכל within 60s is refused — per sender and globally', async () => {
+    it('a cancelled or unconfirmed prompt costs nothing', async () => {
       const h = batchHarness();
       await h.say('כבה הכל');
       await h.say('לא');
       await h.say('כבה הכל');
-      expect(h.sends.at(-1)).toBe('יותר מדי פקודות, נסה עוד רגע');
-      await h.say('הדלק הכל', 'u2');
-      expect(h.sends.at(-1)).toBe('יותר מדי פקודות, נסה עוד רגע');
-      h.nowRef.t += 60_001;
-      await h.say('כבה הכל');
       expect(h.sends.at(-1)).toContain('כן/לא');
+      await h.say('הדלק הכל'); // supersedes, still no limit
+      expect(h.sends.at(-1)).toContain('כן/לא');
+      await h.say('כן');
+      expect(h.toggleCalls).toEqual([
+        { entityId: 'light.garden', verb: 'on' },
+        { entityId: 'switch.fan', verb: 'on' },
+      ]);
+    });
+
+    it('a second confirmed הכל within 10s is refused at כן and can be confirmed once it passes', async () => {
+      const h = batchHarness();
+      await h.say('כבה הכל');
+      await h.say('כן');
+      expect(h.toggleCalls).toHaveLength(3);
+      await h.say('הדלק הכל');
+      expect(h.sends.at(-1)).toContain('כן/לא'); // the prompt itself is free
+      await h.say('כן');
+      expect(h.sends.at(-1)).toBe('יותר מדי פקודות, נסה עוד רגע');
+      expect(h.toggleCalls).toHaveLength(3);
+      h.nowRef.t += 10_000; // just over 10s after the first כן (each say() adds 1ms), inside the 20s prompt
+      await h.say('כן');
+      expect(h.toggleCalls).toHaveLength(5);
+    });
+
+    it('the interval is shared by all senders', async () => {
+      const h = batchHarness();
+      await h.say('כבה הכל');
+      await h.say('כן');
+      await h.say('הדלק הכל', 'u2');
+      await h.say('כן', 'u2');
+      expect(h.sends.at(-1)).toBe('יותר מדי פקודות, נסה עוד רגע');
+      expect(h.toggleCalls).toHaveLength(3);
+      h.nowRef.t += 10_000; // u2's prompt is still pending; retry after the interval
+      await h.say('כן', 'u2');
+      expect(h.toggleCalls).toHaveLength(5);
+    });
+
+    it('a כן that would be rejected anyway does not use up the interval', async () => {
+      const h = batchHarness();
+      await h.say('כבה הכל');
+      h.nowRef.t += 21_000; // prompt expired, not yet ticked
+      await h.say('כן');
+      expect(h.toggleCalls).toHaveLength(0);
+      await h.say('כבה הכל');
+      await h.say('כן');
+      expect(h.toggleCalls).toHaveLength(3);
     });
 
     it('a הכל prompt and a תריסים prompt supersede each other (audited)', async () => {
@@ -1832,7 +1873,7 @@ describe('per-device completion through the bridge', () => {
       expect(h.toggleCalls).toHaveLength(3);
     });
 
-    it('הדלק הכל with nothing to turn on is refused without using the 60s window', async () => {
+    it('הדלק הכל with nothing to turn on is refused up front', async () => {
       const cfg = loadConfig({
         aliasPath: resolve(here, '__fixtures__/switches-only.yaml'),
         env: testConfigEnv,
@@ -1857,17 +1898,6 @@ describe('per-device completion through the bridge', () => {
       nowRef.t += 1;
       await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message: 'כבה הכל' });
       expect(sends.at(-1)).toBe('לכבות את כל 1 האורות והמתגים? כן/לא');
-    });
-
-    it('a sender refused by the global window is free again once it passes', async () => {
-      const h = batchHarness();
-      await h.say('כבה הכל'); // u1 at t
-      h.nowRef.t += 59_000;
-      await h.say('כבה הכל', 'u2'); // refused globally
-      expect(h.sends.at(-1)).toBe('יותר מדי פקודות, נסה עוד רגע');
-      h.nowRef.t += 1_001; // 60s after u1's
-      await h.say('כבה הכל', 'u2');
-      expect(h.sends.at(-1)).toContain('כן/לא');
     });
 
     it('without a supersede, the timestamp check does not apply', async () => {
