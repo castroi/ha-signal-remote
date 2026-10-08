@@ -1,0 +1,18 @@
+verbs:
+  on: ["הדלק"]
+  off: ["כבה"]
+
+entities:
+  socket:
+    type: switch
+    entity_id: switch.socket
+    completion_timeout_ms: 5000
+    # No all_on: "הדלק הכל" has nothing it may turn on.
+    aliases: ["שקע"]
+
+scopes:
+  all_covers:
+    word: "תריסים"
+    expands_to_type: cover
+  all_toggles:
+    word: "הכל"

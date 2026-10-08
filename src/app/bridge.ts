@@ -5,9 +5,10 @@ import { DedupCache } from '../core/dedup.js';
 import { checkFreshness } from '../core/freshness.js';
 import { evaluateClockHealth, type ClockUnhealthyReason } from '../core/clock-health.js';
 import { RateLimiter } from '../core/rate-limit.js';
-import { parseCommand } from '../core/parse.js';
+import { parseCommand, type Scope } from '../core/parse.js';
 import {
   CommandStateMachine,
+  type BatchScope,
   type Effect,
   type EntityRef,
   type CoverVerb,
@@ -25,7 +26,7 @@ import {
   type DeviceEntry,
   type EntitySnapshot,
 } from '../core/status.js';
-import { type AuditLogger } from '../core/audit.js';
+import { type AuditLogger, type AuditReasonCode } from '../core/audit.js';
 import type { HaCallResult } from '../adapters/ha-rest.js';
 import type { IncomingEnvelope } from '../adapters/signal.js';
 
@@ -98,6 +99,10 @@ const REPLY = {
   menu: 'לא הבנתי. נסה: פתח/סגור/עצור + חדר, או "תריסים" לכל התריסים',
   unrecognizedControlReply: 'לא הבנתי. נסה: פתח/סגור/עצור + חדר, או "תריסים" לכל התריסים',
   confirmCancelled: 'בוטל',
+  allTogglesVerbs: '"הכל" עובד רק עם הדלק / כבה',
+  noTracking: 'אין כרגע מעקב מצב, נסה שוב בעוד רגע',
+  requestChanged: 'הבקשה השתנתה, שלח כן שוב',
+  nothingToTurnOn: 'אין אורות או מתגים להדלקה',
 };
 
 export class Bridge {
@@ -461,6 +466,29 @@ export class Bridge {
       return;
     }
 
+    // Supersede guard: after a newer batch replaced an older prompt, a כן stamped
+    // no later than that newer command was sent before it and arrived out of
+    // order — it was meant for the old prompt, so don't let it confirm the new
+    // batch. Both timestamps are sender-side; for the usual one-device sender they
+    // share a clock. (A linked device with a fast clock can only cause a spurious
+    // refusal until the prompt expires, never a wrong confirm.) The prompt stays
+    // pending. It does not catch a כן sent after the newer command was sent.
+    const batch = this.stateMachine.batchOf(commandId);
+    if (batch?.supersedes && batch.submittedAt !== undefined && env.timestamp <= batch.submittedAt) {
+      await this.reply(env, REPLY.requestChanged);
+      this.audit?.log({
+        ts: this.now(),
+        sourceUuid: env.sourceUuid,
+        intent: word,
+        entity: undefined,
+        result: 'rejected',
+        latencyMs: undefined,
+        reasonCode: 'superseded',
+        commandId,
+      });
+      return;
+    }
+
     // Snapshot the devices so any already at the target count as done (HA emits
     // nothing for a no-op). Read it before the gate re-checks below so no await
     // separates those checks from the confirm.
@@ -485,9 +513,11 @@ export class Bridge {
       });
       return;
     }
-    if (!this.coversEnabled()) {
+    // Covers need WS + clock; lights and switches only need the WS (state tracking).
+    const toggles = batch?.scope === 'all-toggles';
+    if (toggles ? !this.wsGate.coversEnabled() : !this.coversEnabled()) {
       this.dropPendingConfirm(env.sourceUuid, commandId);
-      await this.reply(env, this.coverRefusalMessage());
+      await this.reply(env, toggles ? REPLY.noTracking : this.coverRefusalMessage());
       this.audit?.log({
         ts: this.now(),
         sourceUuid: env.sourceUuid,
@@ -541,11 +571,7 @@ export class Bridge {
     if (this.pendingConfirm.get(sourceUuid) === commandId) this.pendingConfirm.delete(sourceUuid);
   }
 
-  private async dispatchCommand(
-    env: IncomingEnvelope,
-    verb: Verb,
-    scope: { type: 'entity'; entityId: string } | { type: 'all-covers' },
-  ): Promise<void> {
+  private async dispatchCommand(env: IncomingEnvelope, verb: Verb, scope: Scope): Promise<void> {
     if (scope.type === 'entity') {
       const entity = this.cfg.aliases.entities.get(scope.entityId);
       if (!entity) {
@@ -658,7 +684,7 @@ export class Bridge {
         reasonCode: undefined,
         commandId,
       });
-    } else {
+    } else if (scope.type === 'all-covers') {
       // all-covers: confirm-gated, also fail-closed on WS/clock.
       if (!this.coversEnabled()) {
         await this.reply(env, this.coverRefusalMessage());
@@ -673,17 +699,6 @@ export class Bridge {
         });
         return;
       }
-      // Fix item 6: if this sender already has a pending_confirm, cancel the
-      // prior command cleanly so it does not emit a spurious failure reply ~20s
-      // later. The new command supersedes the old one.
-      const priorCommandId = this.pendingConfirm.get(env.sourceUuid);
-      if (priorCommandId !== undefined) {
-        this.stateMachine.cancelPendingConfirm(priorCommandId);
-        this.pendingConfirm.delete(env.sourceUuid);
-      }
-
-      const commandId = this.genCommandId();
-      this.replyTo.set(commandId, { uuid: env.sourceUuid, number: env.sourceNumber ?? '' });
       // Each cover carries its own preset target (open_to/close_to); covers with no
       // configured target for this direction fall back to full open/close. The HA
       // script guards direction per cover, so the batch needs no live-position read.
@@ -691,26 +706,96 @@ export class Bridge {
         const e = this.cfg.aliases.entities.get(id)!;
         return toRef(e, this.targetFor(e, verb));
       });
-      const effects = this.stateMachine.submitAll({
-        commandId,
-        sourceUuid: env.sourceUuid,
-        verb: baseVerb(verb),
-        entities,
-      });
-      // Register the pending confirm so handleConfirmReply can resolve it (item 1).
-      this.pendingConfirm.set(env.sourceUuid, commandId);
-      await this.runEffects(effects);
+      await this.submitBatch(env, verb, 'all-covers', entities);
+    } else {
+      await this.dispatchAllToggles(env, verb);
+    }
+  }
+
+  /**
+   * כבה הכל / הדלק הכל: every light and switch (on: lights + all_on switches).
+   * Confirm-gated like תריסים but not clock-gated; refused while the WebSocket is
+   * down (no state tracking) and limited to 1 prompt per 60s across all senders.
+   */
+  private async dispatchAllToggles(env: IncomingEnvelope, verb: Verb): Promise<void> {
+    const reject = async (message: string, reasonCode: AuditReasonCode): Promise<void> => {
+      await this.reply(env, message);
       this.audit?.log({
         ts: this.now(),
         sourceUuid: env.sourceUuid,
-        intent: `${verb} all-covers`,
+        intent: `${verb} all-toggles`,
         entity: undefined,
-        result: 'confirm_prompt',
+        result: 'rejected',
         latencyMs: undefined,
-        reasonCode: undefined,
-        commandId,
+        reasonCode,
+      });
+    };
+    if (verb !== 'on' && verb !== 'off') return reject(REPLY.allTogglesVerbs, 'unsupported-verb');
+    if (!this.wsGate.coversEnabled()) return reject(REPLY.noTracking, 'ws-down');
+    const ids = this.cfg.aliases.toggleEntityIds(verb);
+    // e.g. הדלק הכל with no lights and no all_on switch: nothing to prompt for.
+    if (ids.length === 0) return reject(REPLY.nothingToTurnOn, 'nothing-to-do');
+    if (!this.rateLimiter.allowAllToggles().allowed) {
+      return reject(REPLY.rateLimited, 'rate-limited');
+    }
+    const entities = ids.map((id) => toRef(this.cfg.aliases.entities.get(id)!));
+    await this.submitBatch(env, verb, 'all-toggles', entities);
+  }
+
+  /** Prompt for a confirm-gated batch, superseding the sender's earlier pending one. */
+  private async submitBatch(
+    env: IncomingEnvelope,
+    verb: Verb,
+    scope: BatchScope,
+    entities: EntityRef[],
+  ): Promise<void> {
+    // Fix item 6: if this sender already has a pending_confirm, cancel the
+    // prior command cleanly so it does not emit a spurious failure reply ~20s
+    // later. The new command supersedes the old one.
+    // An entry whose prompt already expired (even if tick() hasn't processed it
+    // yet) is stale, not a supersede.
+    const pendingId = this.pendingConfirm.get(env.sourceUuid);
+    this.pendingConfirm.delete(env.sourceUuid);
+    const priorCommandId =
+      pendingId !== undefined && this.stateMachine.isAwaitingConfirm(pendingId) ? pendingId : undefined;
+    if (priorCommandId !== undefined) {
+      this.stateMachine.cancelPendingConfirm(priorCommandId);
+      this.audit?.log({
+        ts: this.now(),
+        sourceUuid: env.sourceUuid,
+        intent: 'confirm',
+        entity: undefined,
+        result: 'rejected',
+        latencyMs: undefined,
+        reasonCode: 'superseded',
+        commandId: priorCommandId,
       });
     }
+
+    const commandId = this.genCommandId();
+    this.replyTo.set(commandId, { uuid: env.sourceUuid, number: env.sourceNumber ?? '' });
+    const effects = this.stateMachine.submitAll({
+      commandId,
+      sourceUuid: env.sourceUuid,
+      verb: baseVerb(verb),
+      entities,
+      scope,
+      submittedAt: env.timestamp,
+      supersedes: priorCommandId !== undefined,
+    });
+    // Register the pending confirm so handleConfirmReply can resolve it (item 1).
+    this.pendingConfirm.set(env.sourceUuid, commandId);
+    await this.runEffects(effects);
+    this.audit?.log({
+      ts: this.now(),
+      sourceUuid: env.sourceUuid,
+      intent: `${verb} ${scope}`,
+      entity: undefined,
+      result: 'confirm_prompt',
+      latencyMs: undefined,
+      reasonCode: undefined,
+      commandId,
+    });
   }
 
   /** Forward an observed HA state into the state machine; reply on resolution. */
@@ -873,7 +958,8 @@ export class Bridge {
           break;
         case 'reply-confirm-prompt': {
           const action = (e.preset ? PRESET_PROMPT_VERB[e.verb] : undefined) ?? PROMPT_VERB[e.verb];
-          await this.replyToCommand(e.commandId, `${action} את כל ${e.count} התריסים? כן/לא`);
+          const devices = e.scope === 'all-toggles' ? 'האורות והמתגים' : 'התריסים';
+          await this.replyToCommand(e.commandId, `${action} את כל ${e.count} ${devices}? כן/לא`);
           break;
         }
       }

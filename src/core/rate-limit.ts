@@ -18,6 +18,10 @@ export type RateDecision = { allowed: true } | { allowed: false; reason: RateLim
 
 const CONFIRM_WINDOW_MS = 60_000;
 
+/** The all-toggles scope (כבה/הדלק הכל): 1 prompt per 60s across all senders. */
+const ALL_TOGGLES_WINDOW_MS = 60_000;
+const ALL_TOGGLES_MAX = 1;
+
 /** A sliding-window counter using a list of event timestamps. */
 class SlidingWindow {
   private readonly hits: number[] = [];
@@ -49,6 +53,7 @@ export class RateLimiter {
   private readonly perSender = new Map<string, SlidingWindow>();
   private readonly global = new SlidingWindow();
   private readonly confirmLane = new Map<string, SlidingWindow>();
+  private readonly allToggles = new SlidingWindow();
 
   constructor(opts: RateLimiterOptions) {
     this.tunables = opts.tunables;
@@ -81,6 +86,18 @@ export class RateLimiter {
       // Roll back the per-sender hit we just committed would require extra state;
       // instead, treat the global trip as authoritative. The per-sender hit is
       // harmless (it only tightens that sender briefly) and keeps the code simple.
+      return { allowed: false, reason: 'rate-limited' };
+    }
+    return { allowed: true };
+  }
+
+  /**
+   * The all-toggles scope, on top of the normal command caps: switching every
+   * light and switch at once is limited to 1 prompt per 60s across all senders
+   * (which also bounds each sender), so it can't cycle relays or loads.
+   */
+  allowAllToggles(): RateDecision {
+    if (!this.allToggles.tryHit(this.now(), ALL_TOGGLES_MAX, ALL_TOGGLES_WINDOW_MS)) {
       return { allowed: false, reason: 'rate-limited' };
     }
     return { allowed: true };

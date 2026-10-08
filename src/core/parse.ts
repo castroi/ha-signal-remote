@@ -16,7 +16,10 @@ const NORMALIZED_RESERVED: ReadonlyMap<string, string> = new Map(
  * so the reply layer (and audit log) can react precisely.
  */
 
-export type Scope = { type: 'entity'; entityId: string } | { type: 'all-covers' };
+export type Scope =
+  | { type: 'entity'; entityId: string }
+  | { type: 'all-covers' }
+  | { type: 'all-toggles' };
 
 export type ParseResult =
   | { kind: 'command'; verb: Verb; scope: Scope }
@@ -69,6 +72,17 @@ export function parseCommand(raw: string, aliases: AliasTable): ParseResult {
   // All-covers scope word.
   if (targetTokens.some((t) => t === aliases.allCoversWord)) {
     return { kind: 'command', verb, scope: { type: 'all-covers' } };
+  }
+
+  // All-toggles scope word: only as the ENTIRE target. Unlike תריסים it acts on
+  // every light and switch, and its normalized form (כל) also appears in ordinary
+  // phrases ("כבה את כל האורות בסלון"), so it must never match inside one.
+  if (
+    aliases.allTogglesWord !== undefined &&
+    targetTokens.length === 1 &&
+    targetTokens[0] === aliases.allTogglesWord
+  ) {
+    return { kind: 'command', verb, scope: { type: 'all-toggles' } };
   }
 
   // Try matching the target tokens against entity aliases. Aliases may be
