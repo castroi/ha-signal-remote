@@ -184,6 +184,10 @@ export class Bridge {
     for (const entityId of toStop) {
       void this.haRest.callCover(entityId, 'stop');
     }
+    // Abandon all tracking: no late replies for commands the kill switch cut off.
+    this.stateMachine.clearAll();
+    this.replyTo.clear();
+    this.pendingConfirm.clear();
   }
 
   /** Main entrypoint for an incoming Signal envelope. */
@@ -395,6 +399,20 @@ export class Bridge {
     const commandId = this.pendingConfirm.get(env.sourceUuid);
 
     if (commandId === undefined) {
+      // engageKill() drops pending confirms; say why a כן no longer does anything.
+      if (word === 'כן' && this.killSwitch.blocksCommands()) {
+        await this.reply(env, REPLY.killed);
+        this.audit?.log({
+          ts: this.now(),
+          sourceUuid: env.sourceUuid,
+          intent: word,
+          entity: undefined,
+          result: 'rejected',
+          latencyMs: undefined,
+          reasonCode: 'kill-switch',
+        });
+        return;
+      }
       // No live pending_confirm for this sender: unrecognized control reply.
       await this.reply(env, REPLY.unrecognizedControlReply);
       this.audit?.log({
@@ -426,8 +444,8 @@ export class Bridge {
     }
 
     if (word === 'לא') {
-      // Cancel: remove pending context. The state machine will expire it via tick()
-      // if the record is still pending_confirm; we just clear the bridge-side binding.
+      // Cancel: drop the pending record too, so tick() never reports it as failed.
+      this.stateMachine.cancelPendingConfirm(commandId);
       this.pendingConfirm.delete(env.sourceUuid);
       await this.reply(env, REPLY.confirmCancelled);
       this.audit?.log({
@@ -443,12 +461,17 @@ export class Bridge {
       return;
     }
 
+    // Snapshot the devices so any already at the target count as done (HA emits
+    // nothing for a no-op). Read it before the gate re-checks below so no await
+    // separates those checks from the confirm.
+    const snapshot = await this.haRest.getStates(this.stateMachine.entityIdsOf(commandId));
+
     // Fix item 3 (MED): Re-check safety gates at confirm time. A כן arriving
     // after the kill switch is engaged or WS/clock went unhealthy must NOT
     // actuate covers. The confirm lane is exempt from rate caps only — not from
     // safety gates (§5 kill-switch + fail-closed design).
     if (this.killSwitch.blocksCommands()) {
-      this.pendingConfirm.delete(env.sourceUuid);
+      this.dropPendingConfirm(env.sourceUuid, commandId);
       await this.reply(env, REPLY.killed);
       this.audit?.log({
         ts: this.now(),
@@ -463,7 +486,7 @@ export class Bridge {
       return;
     }
     if (!this.coversEnabled()) {
-      this.pendingConfirm.delete(env.sourceUuid);
+      this.dropPendingConfirm(env.sourceUuid, commandId);
       await this.reply(env, this.coverRefusalMessage());
       this.audit?.log({
         ts: this.now(),
@@ -479,10 +502,11 @@ export class Bridge {
     }
 
     // כן: context-bound confirm through the state machine.
-    const result = this.stateMachine.confirm(commandId, env.sourceUuid);
+    const result = this.stateMachine.confirm(commandId, env.sourceUuid, snapshot);
     if (!result.accepted) {
-      // The state machine rejected it (expired, wrong sender, already resolved).
-      this.pendingConfirm.delete(env.sourceUuid);
+      // The state machine rejected it (expired, wrong sender, already resolved,
+      // or superseded by a newer batch while the snapshot was read).
+      this.dropPendingConfirm(env.sourceUuid, commandId);
       await this.reply(env, REPLY.unrecognizedControlReply);
       this.audit?.log({
         ts: this.now(),
@@ -498,7 +522,7 @@ export class Bridge {
     }
 
     // Confirmed: clear the pending binding and execute effects (issue all covers).
-    this.pendingConfirm.delete(env.sourceUuid);
+    this.dropPendingConfirm(env.sourceUuid, commandId);
     await this.runEffects(result.effects);
     this.audit?.log({
       ts: this.now(),
@@ -510,6 +534,11 @@ export class Bridge {
       reasonCode: undefined,
       commandId,
     });
+  }
+
+  /** Clear a sender's pending confirm only if it still points at this command. */
+  private dropPendingConfirm(sourceUuid: string, commandId: string): void {
+    if (this.pendingConfirm.get(sourceUuid) === commandId) this.pendingConfirm.delete(sourceUuid);
   }
 
   private async dispatchCommand(
@@ -578,6 +607,36 @@ export class Bridge {
         }
       }
 
+      // Snapshot first: a device already at the target emits no state_changed.
+      const snapshot = await this.haRest.getStates([entity.entityId]);
+      // The read awaited: re-check the gates that may have closed meanwhile.
+      if (this.killSwitch.blocksCommands()) {
+        await this.reply(env, REPLY.killed);
+        this.audit?.log({
+          ts: this.now(),
+          sourceUuid: env.sourceUuid,
+          intent: `${effectiveVerb} ${entity.entityId}`,
+          entity: entity.entityId,
+          result: 'rejected',
+          latencyMs: undefined,
+          reasonCode: 'kill-switch',
+        });
+        return;
+      }
+      if (entity.type === 'cover' && !this.coversEnabled()) {
+        await this.reply(env, this.coverRefusalMessage());
+        this.audit?.log({
+          ts: this.now(),
+          sourceUuid: env.sourceUuid,
+          intent: `${effectiveVerb} ${entity.entityId}`,
+          entity: entity.entityId,
+          result: 'rejected',
+          latencyMs: undefined,
+          reasonCode: this.wsGate.coversEnabled() ? 'clock-unhealthy' : 'ws-down',
+        });
+        return;
+      }
+
       const commandId = this.genCommandId();
       this.replyTo.set(commandId, { uuid: env.sourceUuid, number: env.sourceNumber ?? '' });
       const ref = toRef(entity, target);
@@ -586,6 +645,7 @@ export class Bridge {
         sourceUuid: env.sourceUuid,
         verb: effectiveVerb,
         entity: ref,
+        snapshot,
       });
       await this.runEffects(effects);
       this.audit?.log({
@@ -631,10 +691,10 @@ export class Bridge {
         const e = this.cfg.aliases.entities.get(id)!;
         return toRef(e, this.targetFor(e, verb));
       });
-      const effects = this.stateMachine.submitAllCovers({
+      const effects = this.stateMachine.submitAll({
         commandId,
         sourceUuid: env.sourceUuid,
-        verb: baseVerb(verb) as CoverVerb,
+        verb: baseVerb(verb),
         entities,
       });
       // Register the pending confirm so handleConfirmReply can resolve it (item 1).
@@ -664,10 +724,21 @@ export class Bridge {
     this.dedup.sweep();
     const effects = this.stateMachine.tick();
     await this.runEffects(effects);
+    for (const commandId of this.stateMachine.prune()) this.replyTo.delete(commandId);
   }
 
   private async runEffects(effects: Effect[]): Promise<void> {
     for (const e of effects) {
+      // A batch issues one HA call at a time and envelopes run concurrently, so by
+      // the time a call's turn comes its device may be done already (snapshot),
+      // taken over by a newer command, or dropped by the kill switch. Only call HA
+      // for devices this command is still waiting on. Stops always go out.
+      if (
+        (e.kind === 'issue-cover' || e.kind === 'issue-cover-position' || e.kind === 'issue-toggle') &&
+        !this.stateMachine.isPending(e.commandId, e.entityId)
+      ) {
+        continue;
+      }
       switch (e.kind) {
         case 'issue-cover': {
           const r = await this.haRest.callCover(e.entityId, e.verb);
@@ -701,7 +772,7 @@ export class Bridge {
         case 'issue-toggle': {
           const r = await this.haRest.callToggle(e.domain, e.entityId, e.verb);
           if (!r.ok) {
-            const failEffects = this.stateMachine.markIssueFailed(e.commandId);
+            const failEffects = this.stateMachine.markEntityIssueFailed(e.commandId, e.entityId);
             await this.runEffects(failEffects);
           }
           break;
@@ -748,21 +819,45 @@ export class Bridge {
             commandId: e.commandId,
           });
           break;
-        case 'reply-entity-failed':
-          // Fix item 4: a single cover in an all-covers command failed; report
-          // that entity's failure while the others continue to be tracked.
-          await this.replyToCommand(e.commandId, `${e.entityId} ${REPLY.failed}`);
+        case 'reply-summary': {
+          await this.replyToCommand(e.commandId, this.summaryText(e.done, e.failed, e.timedOut));
+          const sourceUuid = this.replyTo.get(e.commandId)?.uuid ?? '';
+          for (const entity of e.failed) {
+            this.audit?.log({
+              ts: this.now(),
+              sourceUuid,
+              intent: 'completion',
+              entity,
+              result: 'failed',
+              latencyMs: undefined,
+              reasonCode: 'entity-issue-failed',
+              commandId: e.commandId,
+            });
+          }
+          for (const entity of e.timedOut) {
+            this.audit?.log({
+              ts: this.now(),
+              sourceUuid,
+              intent: 'completion',
+              entity,
+              result: 'timeout',
+              latencyMs: undefined,
+              reasonCode: undefined,
+              commandId: e.commandId,
+            });
+          }
           this.audit?.log({
             ts: this.now(),
-            sourceUuid: this.replyTo.get(e.commandId)?.uuid ?? '',
+            sourceUuid,
             intent: 'completion',
-            entity: e.entityId,
-            result: 'failed',
+            entity: undefined,
+            result: e.timedOut.length > 0 ? 'timeout' : e.failed.length > 0 ? 'failed' : 'observed_target',
             latencyMs: undefined,
-            reasonCode: 'entity-issue-failed',
+            reasonCode: 'summary',
             commandId: e.commandId,
           });
           break;
+        }
         case 'reply-preempted':
           await this.replyToCommand(e.commandId, REPLY.preempted);
           this.audit?.log({
@@ -776,11 +871,29 @@ export class Bridge {
             commandId: e.commandId,
           });
           break;
-        case 'reply-confirm-prompt':
-          await this.replyToCommand(e.commandId, `לסגור את כל ${e.count} התריסים? כן/לא`);
+        case 'reply-confirm-prompt': {
+          const action = (e.preset ? PRESET_PROMPT_VERB[e.verb] : undefined) ?? PROMPT_VERB[e.verb];
+          await this.replyToCommand(e.commandId, `${action} את כל ${e.count} התריסים? כן/לא`);
           break;
+        }
       }
     }
+  }
+
+  /**
+   * One reply for a finished multi-device command, naming devices by their first
+   * alias in config order: `בוצע`, `בוצע, חוץ מ: …`, or `הפעולה נכשלה: …`.
+   */
+  private summaryText(done: string[], failed: string[], timedOut: string[]): string {
+    const problems: string[] = [];
+    for (const entity of this.cfg.aliases.entities.values()) {
+      const name = entity.aliases[0] ?? entity.canonical;
+      if (timedOut.includes(entity.entityId)) problems.push(`${name} (לא הגיב)`);
+      else if (failed.includes(entity.entityId)) problems.push(`${name} (נכשל)`);
+    }
+    if (problems.length === 0) return REPLY.success;
+    const list = problems.join(', ');
+    return done.length > 0 ? `${REPLY.success}, חוץ מ: ${list}` : `${REPLY.failed}: ${list}`;
   }
 
   private coversEnabled(): boolean {
@@ -916,6 +1029,21 @@ export class Bridge {
 
 /** How long one סטטוס device snapshot is reused before HA is read again. */
 const STATUS_CACHE_MS = 3_000;
+
+/** Infinitive for a batch confirm prompt ("לסגור את כל …?"). */
+const PROMPT_VERB: Record<CoverVerb | ToggleVerb, string> = {
+  open: 'לפתוח',
+  close: 'לסגור',
+  stop: 'לעצור',
+  on: 'להדליק',
+  off: 'לכבות',
+};
+
+/** A batch that drives covers to configured positions (open_to / close_to). */
+const PRESET_PROMPT_VERB: Partial<Record<CoverVerb | ToggleVerb, string>> = {
+  open: 'להרים',
+  close: 'להוריד',
+};
 
 /** Status label per clock-unhealthy cause, so סטטוס reports the real reason. */
 const CLOCK_REASON_LABEL: Record<ClockUnhealthyReason, CoversDisabledReason> = {

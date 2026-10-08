@@ -899,10 +899,12 @@ describe('Item 8: per-entity completion deadlines for all-covers', () => {
     nowRef.t += 40_000;
     await bridge.tick();
 
-    // Each timed-out entity should produce its own timeout reply.
+    // One summary names every timed-out cover (none dropped).
     const timeoutReplies = sends.filter((m) => m.includes('לא הגיב'));
-    const coverCount = cfg.aliases.coverEntityIds().length;
-    expect(timeoutReplies.length).toBe(coverCount);
+    expect(timeoutReplies).toEqual([
+      'הפעולה נכשלה: סלון (לא הגיב), מטבח (לא הגיב), חדר ילדים (לא הגיב), חדר הורים (לא הגיב)',
+    ]);
+    expect(cfg.aliases.coverEntityIds()).toHaveLength(4);
   });
 });
 
@@ -1018,29 +1020,17 @@ describe('Fix 4 (MED): per-entity failure in all-covers command', () => {
     // All cover entities were called (issue attempts for all).
     expect(coverCallCount).toBe(coverIds.length);
 
-    // The failing entity should produce an entity-level failure reply.
-    // The command as a whole should NOT have immediately emitted reply-failed if
-    // other entities are still in flight.
-    const failedReplies = sends.filter((m) => m === 'הפעולה נכשלה');
-    const entityFailedReplies = sends.filter((m) => m.includes(firstCoverId) && m.includes('הפעולה נכשלה'));
+    // Nothing is reported yet: the other covers are still in flight.
+    expect(sends.some((m) => m.includes('נכשל'))).toBe(false);
 
-    // If there is only one cover, the whole command fails (same as before).
-    if (coverIds.length === 1) {
-      expect(failedReplies.length).toBeGreaterThanOrEqual(1);
-    } else {
-      // Multiple covers: only the failing entity's failure is reported immediately.
-      // The overall command should NOT be in a terminal failed state yet.
-      expect(entityFailedReplies.length).toBeGreaterThanOrEqual(1);
-
-      // Advance past the completion timeout to confirm remaining covers time out
-      // (proves they are still being tracked, not silently dropped).
-      nowRef.t += 40_000;
-      await bridge.tick();
-
-      const timeoutReplies = sends.filter((m) => m.includes('לא הגיב'));
-      // The remaining (non-failed) covers should time out.
-      expect(timeoutReplies.length).toBe(coverIds.length - 1);
-    }
+    // The remaining covers are still tracked (not dropped) and time out; one
+    // summary reports the failed cover and the timed-out ones.
+    expect(firstCoverId).toBe('cover.living_room');
+    nowRef.t += 40_000;
+    await bridge.tick();
+    expect(sends.at(-1)).toBe(
+      'הפעולה נכשלה: סלון (נכשל), מטבח (לא הגיב), חדר ילדים (לא הגיב), חדר הורים (לא הגיב)',
+    );
   });
 });
 
@@ -1418,5 +1408,276 @@ describe('Item 10: allAliases() returns canonical display names', () => {
     const reply = h.sends.find((s) => s.message.includes('איזה?'));
     expect(reply).toBeDefined();
     expect(reply!.message).toContain('חדר ילדים'); // canonical multi-word alias
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-device completion: snapshot, one progress, one summary, cancel, kill
+// ---------------------------------------------------------------------------
+
+describe('per-device completion through the bridge', () => {
+  const COVERS = ['cover.living_room', 'cover.kitchen', 'cover.kids_room', 'cover.parents_room'];
+
+  function batchHarness(opts: {
+    failCover?: string;
+    states?: ReadonlyMap<string, EntitySnapshot>;
+    audit?: AuditLogger;
+  } = {}) {
+    const nowRef = { t: 1_000_000 };
+    const sends: string[] = [];
+    const coverCalls: { entityId: string; verb: string }[] = [];
+    const bridge = new Bridge({
+      config: testConfig(),
+      now: () => nowRef.t,
+      emitNotice: () => {},
+      ...(opts.audit ? { audit: opts.audit } : {}),
+      haRest: {
+        ...noPositionPort,
+        getStates: async () => opts.states,
+        callCover: vi.fn(async (entityId: string, verb: string) => {
+          coverCalls.push({ entityId, verb });
+          return entityId === opts.failCover ? ({ ok: false, reason: 'failed' } as const) : ({ ok: true } as const);
+        }),
+        callToggle: vi.fn(async () => ({ ok: true }) as const),
+      },
+      signal: { send: vi.fn(async (_u: string, _n: string, m: string) => { sends.push(m); return true; }) },
+      clock: { snapshot: () => ({ skewSampleMs: 0, lastGoodCheckAt: nowRef.t, allReferencesUnreachable: false }) },
+    });
+    bridge.onWsConnected();
+    nowRef.t += 11_000;
+    const say = async (message: string) => {
+      nowRef.t += 1;
+      await bridge.handleEnvelope({ sourceUuid: 'u1', sourceNumber: '+1', timestamp: nowRef.t, message });
+    };
+    return { bridge, sends, coverCalls, nowRef, say };
+  }
+
+  it('G: a light already in the target state acks immediately', async () => {
+    const h = batchHarness({ states: new Map([['light.garden', { state: 'off' }]]) });
+    await h.say('כבה גינה');
+    expect(h.sends).toContain('בוצע');
+    h.nowRef.t += 10_000;
+    await h.bridge.tick();
+    expect(h.sends.some((m) => m.includes('לא הגיב'))).toBe(false);
+  });
+
+  it('G: covers already closed count as done in the batch', async () => {
+    const h = batchHarness({
+      states: new Map([
+        ['cover.living_room', { state: 'closed', position: 0 }],
+        ['cover.kitchen', { state: 'closed', position: 0 }],
+      ]),
+    });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    await h.bridge.onStateChanged('cover.kids_room', 'closed');
+    await h.bridge.onStateChanged('cover.parents_room', 'closed');
+    expect(h.sends.at(-1)).toBe('בוצע');
+  });
+
+  it('C: a confirmed batch sends exactly one progress reply and one בוצע at the end', async () => {
+    const h = batchHarness();
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    expect(h.sends.filter((m) => m === 'מבצע…')).toHaveLength(1);
+    for (const id of COVERS.slice(0, 3)) await h.bridge.onStateChanged(id, 'closed');
+    expect(h.sends).not.toContain('בוצע');
+    await h.bridge.onStateChanged(COVERS[3]!, 'closed');
+    expect(h.sends.filter((m) => m === 'בוצע')).toHaveLength(1);
+  });
+
+  it('summary names the device that did not respond', async () => {
+    const h = batchHarness();
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    for (const id of COVERS.slice(0, 3)) await h.bridge.onStateChanged(id, 'closed');
+    h.nowRef.t += 40_000;
+    await h.bridge.tick();
+    expect(h.sends.at(-1)).toBe('בוצע, חוץ מ: חדר הורים (לא הגיב)');
+  });
+
+  it('summary names the device whose HA call failed', async () => {
+    const h = batchHarness({ failCover: 'cover.kitchen' });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    expect(h.sends.some((m) => m.includes('cover.kitchen'))).toBe(false);
+    for (const id of ['cover.living_room', 'cover.kids_room', 'cover.parents_room']) {
+      await h.bridge.onStateChanged(id, 'closed');
+    }
+    expect(h.sends.at(-1)).toBe('בוצע, חוץ מ: מטבח (נכשל)');
+  });
+
+  it('nothing done → הפעולה נכשלה with the reasons', async () => {
+    const h = batchHarness({ failCover: 'cover.kitchen' });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    h.nowRef.t += 40_000;
+    await h.bridge.tick();
+    expect(h.sends.at(-1)).toBe(
+      'הפעולה נכשלה: סלון (לא הגיב), מטבח (נכשל), חדר ילדים (לא הגיב), חדר הורים (לא הגיב)',
+    );
+  });
+
+  it.each([
+    ['פתח תריסים', 'לפתוח את כל 4 התריסים? כן/לא'],
+    ['סגור תריסים', 'לסגור את כל 4 התריסים? כן/לא'],
+    ['העלה תריסים', 'להרים את כל 4 התריסים? כן/לא'],
+    ['הנמך תריסים', 'להוריד את כל 4 התריסים? כן/לא'],
+  ])('B: %s prompts "%s"', async (command, prompt) => {
+    const h = batchHarness();
+    await h.say(command);
+    expect(h.sends.at(-1)).toBe(prompt);
+  });
+
+  it('E: לא cancels for real — no late הפעולה נכשלה', async () => {
+    const h = batchHarness();
+    await h.say('סגור תריסים');
+    await h.say('לא');
+    expect(h.sends.at(-1)).toBe('בוטל');
+    h.nowRef.t += 30_000;
+    await h.bridge.tick();
+    expect(h.sends.at(-1)).toBe('בוטל');
+  });
+
+  it('K: the kill switch stops only covers still moving and silences the batch', async () => {
+    const h = batchHarness();
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    await h.bridge.onStateChanged('cover.living_room', 'closed');
+    const before = h.coverCalls.length;
+    h.bridge.engageKill();
+    const stops = h.coverCalls.slice(before).filter((c) => c.verb === 'stop').map((c) => c.entityId);
+    expect(stops.sort()).toEqual(['cover.kids_room', 'cover.kitchen', 'cover.parents_room']);
+    const sent = h.sends.length;
+    h.nowRef.t += 60_000;
+    await h.bridge.tick();
+    await h.bridge.onStateChanged('cover.kitchen', 'closed');
+    expect(h.sends).toHaveLength(sent);
+  });
+
+  it('#1: a kill switch engaged while the snapshot is read stops a single command', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const h = batchHarness();
+    const getStates = vi.fn(async () => {
+      await gate;
+      return undefined;
+    });
+    (h.bridge as unknown as { haRest: { getStates: typeof getStates } }).haRest.getStates = getStates;
+    const pending = h.say('סגור סלון');
+    await new Promise((r) => setImmediate(r));
+    h.bridge.engageKill();
+    release();
+    await pending;
+    expect(h.coverCalls.filter((c) => c.verb === 'close')).toHaveLength(0);
+    expect(h.sends.at(-1)).toBe('המערכת בכיבוי חירום');
+  });
+
+  it('#2: a newer batch arriving while כן reads the snapshot keeps its own pending confirm', async () => {
+    const h = batchHarness();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let first = true;
+    (h.bridge as unknown as { haRest: { getStates: () => Promise<undefined> } }).haRest.getStates = async () => {
+      if (first) {
+        first = false;
+        await gate;
+      }
+      return undefined;
+    };
+    await h.say('סגור תריסים');
+    const yes = h.say('כן'); // reads the snapshot (blocked)
+    await new Promise((r) => setImmediate(r));
+    await h.say('פתח תריסים'); // supersedes while the first כן waits
+    release();
+    await yes;
+    expect(h.coverCalls.filter((c) => c.verb === 'close')).toHaveLength(0);
+    await h.say('כן'); // confirms the newer batch
+    expect(h.coverCalls.filter((c) => c.verb === 'open')).toHaveLength(4);
+  });
+
+  it('#4: the kill switch engaged mid-batch issues no further covers', async () => {
+    const h = batchHarness();
+    const callCover = (h.bridge as unknown as { haRest: { callCover: ReturnType<typeof vi.fn> } }).haRest.callCover;
+    callCover.mockImplementationOnce(async (entityId: string, verb: string) => {
+      h.coverCalls.push({ entityId, verb });
+      h.bridge.engageKill();
+      return { ok: true } as const;
+    });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    expect(h.coverCalls.filter((c) => c.verb === 'close')).toHaveLength(1);
+  });
+
+  it('a single command arriving mid-batch is not overridden by the batch', async () => {
+    const h = batchHarness();
+    const callCover = (h.bridge as unknown as { haRest: { callCover: ReturnType<typeof vi.fn> } }).haRest.callCover;
+    let single: Promise<void> | undefined;
+    callCover.mockImplementationOnce(async (entityId: string, verb: string) => {
+      h.coverCalls.push({ entityId, verb });
+      // While the batch is on its first cover, the kitchen gets its own command.
+      single = h.say('פתח מטבח');
+      await single;
+      return { ok: true } as const;
+    });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    await single;
+    const kitchen = h.coverCalls.filter((c) => c.entityId === 'cover.kitchen').map((c) => c.verb);
+    expect(kitchen).toEqual(['stop', 'open']); // the batch's older 'close' never follows
+    expect(h.coverCalls.filter((c) => c.verb === 'close').map((c) => c.entityId)).toEqual([
+      'cover.living_room',
+      'cover.kids_room',
+      'cover.parents_room',
+    ]);
+  });
+
+  it('a device already at its target gets no HA call', async () => {
+    const h = batchHarness({ states: new Map([['cover.living_room', { state: 'closed', position: 0 }]]) });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    expect(h.coverCalls.some((c) => c.entityId === 'cover.living_room')).toBe(false);
+  });
+
+  it('K: a כן sent after the kill switch dropped the pending confirm says why', async () => {
+    const h = batchHarness();
+    await h.say('סגור תריסים');
+    h.bridge.engageKill();
+    await h.say('כן');
+    expect(h.sends.at(-1)).toBe('המערכת בכיבוי חירום');
+    expect(h.coverCalls.filter((c) => c.verb === 'close')).toHaveLength(0);
+  });
+
+  it('F: a pruned command is forgotten by the bridge as well', async () => {
+    const h = batchHarness();
+    await h.say('כבה גינה');
+    await h.bridge.onStateChanged('light.garden', 'off');
+    const replyTo = (h.bridge as unknown as { replyTo: Map<string, unknown> }).replyTo;
+    expect(replyTo.size).toBe(1);
+    h.nowRef.t += 10 * 60_000 + 1;
+    await h.bridge.tick();
+    expect(replyTo.size).toBe(0);
+  });
+
+  it('audit: one summary event plus one per failed/timed-out device, no names', async () => {
+    const lines: string[] = [];
+    const audit = new AuditLogger({ salt: 's', sink: (l) => lines.push(l) });
+    const h = batchHarness({ failCover: 'cover.kitchen', audit });
+    await h.say('סגור תריסים');
+    await h.say('כן');
+    for (const id of ['cover.living_room', 'cover.kids_room']) await h.bridge.onStateChanged(id, 'closed');
+    h.nowRef.t += 40_000;
+    await h.bridge.tick();
+    const events = lines.map((l) => JSON.parse(l) as AuditEvent).filter((e) => e.intent === 'completion');
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ entity: 'cover.kitchen', result: 'failed', reasonCode: 'entity-issue-failed' }),
+        expect.objectContaining({ entity: 'cover.parents_room', result: 'timeout' }),
+        expect.objectContaining({ result: 'timeout', reasonCode: 'summary' }),
+      ]),
+    );
+    expect(events.filter((e) => e.reasonCode === 'summary')).toHaveLength(1);
+    expect(events).toHaveLength(3);
+    for (const l of lines) expect(l).not.toMatch(/מטבח|חדר הורים/);
   });
 });
