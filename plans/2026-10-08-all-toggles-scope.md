@@ -11,7 +11,7 @@
 - `off` = every light + switch. `on` = every light + only switches marked `all_on: true` (a remotely powered socket/fan is a physical hazard). Both confirm-gated.
 - The scope word must be the **entire** target (`כבה הכל`, `הדלק את הכל`), never part of a longer phrase.
 - `הכל` is refused while HA's WebSocket is down (no state tracking) — same as covers; no untracked mode.
-- Dedicated limit for the scope: 1 per 60s per sender and globally (a third window in the existing `RateLimiter`).
+- Dedicated limit for the scope: 1 per 60s per sender and globally (a third window in the existing `RateLimiter`). **Superseded after rollout:** now one *confirmed* action per `min_interval_s` (default 10s) across all senders, counted at `כן` — see README `scopes.all_toggles`.
 - One tracking path for all commands (`settle()`); only the final reply differs: 1 device → today's replies, >1 → one summary with device names.
 
 ---

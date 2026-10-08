@@ -531,6 +531,30 @@ export class Bridge {
       return;
     }
 
+    // כבה/הדלק הכל: at most one confirmed action per min_interval_s (all senders).
+    // Counted only for a כן that will actually confirm, so a cancelled, expired or
+    // rejected one costs nothing; when refused the prompt stays pending for a retry.
+    // (isAwaitingConfirm and confirm read the clock separately; a deadline crossed
+    // in between would only waste one interval, never issue anything.)
+    if (
+      toggles &&
+      this.stateMachine.isAwaitingConfirm(commandId) &&
+      !this.rateLimiter.allowAllToggles(this.cfg.aliases.allTogglesMinIntervalMs).allowed
+    ) {
+      await this.reply(env, REPLY.rateLimited);
+      this.audit?.log({
+        ts: this.now(),
+        sourceUuid: env.sourceUuid,
+        intent: word,
+        entity: undefined,
+        result: 'rejected',
+        latencyMs: undefined,
+        reasonCode: 'rate-limited',
+        commandId,
+      });
+      return;
+    }
+
     // כן: context-bound confirm through the state machine.
     const result = this.stateMachine.confirm(commandId, env.sourceUuid, snapshot);
     if (!result.accepted) {
@@ -715,7 +739,8 @@ export class Bridge {
   /**
    * כבה הכל / הדלק הכל: every light and switch (on: lights + all_on switches).
    * Confirm-gated like תריסים but not clock-gated; refused while the WebSocket is
-   * down (no state tracking) and limited to 1 prompt per 60s across all senders.
+   * down (no state tracking). The rate limit applies at כן (see handleConfirmReply),
+   * so a cancelled or expired prompt costs nothing.
    */
   private async dispatchAllToggles(env: IncomingEnvelope, verb: Verb): Promise<void> {
     const reject = async (message: string, reasonCode: AuditReasonCode): Promise<void> => {
@@ -735,9 +760,6 @@ export class Bridge {
     const ids = this.cfg.aliases.toggleEntityIds(verb);
     // e.g. הדלק הכל with no lights and no all_on switch: nothing to prompt for.
     if (ids.length === 0) return reject(REPLY.nothingToTurnOn, 'nothing-to-do');
-    if (!this.rateLimiter.allowAllToggles().allowed) {
-      return reject(REPLY.rateLimited, 'rate-limited');
-    }
     const entities = ids.map((id) => toRef(this.cfg.aliases.entities.get(id)!));
     await this.submitBatch(env, verb, 'all-toggles', entities);
   }

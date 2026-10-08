@@ -213,7 +213,9 @@ concurrent operations are unambiguous.
   single-flight and cached 3s so un-rate-limited status cannot amplify load on HA.
 - **All lights and switches (`הכל`)**: one message can power every light and switch, so it is
   confirm-gated, matched only as the entire target (never inside a sentence), limited to
-  1 prompt per 60s across all senders, and refused while the HA WebSocket is down. `הדלק הכל`
+  one confirmed action per `min_interval_s` (default 10s) across all senders — counted at
+  `כן`, so cancelled or expired prompts cost nothing — and refused while the HA WebSocket is
+  down. `הדלק הכל`
   turns on switches only when opted in with `all_on` (a remotely powered socket/fan is a
   hazard). After a newer batch replaces a pending prompt, a `כן` stamped before that newer
   command (i.e. one that arrived out of order) is refused instead of confirming the new batch.

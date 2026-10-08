@@ -319,6 +319,27 @@ describe('all_toggles scope (כבה הכל / הדלק הכל)', () => {
     expect(() => make({ word })).toThrow(/all_toggles/);
   });
 
+  it('min_interval_s defaults to 10s and can be set or disabled', () => {
+    expect(make().allTogglesMinIntervalMs).toBe(10_000);
+    const scopes = (extra: Record<string, unknown>) => ({
+      all_covers: { word: 'תריסים', expands_to_type: 'cover' },
+      all_toggles: { word: 'הכל', ...extra },
+    });
+    expect(make({ scopes: scopes({ min_interval_s: 30 }) }).allTogglesMinIntervalMs).toBe(30_000);
+    expect(make({ scopes: scopes({ min_interval_s: 0 }) }).allTogglesMinIntervalMs).toBe(0);
+  });
+
+  it.each([-1, 2.5, 3601, '10'])('rejects min_interval_s %j', (value) => {
+    expect(() =>
+      make({
+        scopes: {
+          all_covers: { word: 'תריסים', expands_to_type: 'cover' },
+          all_toggles: { word: 'הכל', min_interval_s: value },
+        },
+      }),
+    ).toThrow(/min_interval_s must be an integer/);
+  });
+
   it('rejects unknown keys inside all_toggles (e.g. a typo of word)', () => {
     expect(() =>
       make({ scopes: { all_covers: { word: 'תריסים', expands_to_type: 'cover' }, all_toggles: { wrod: 'הכל' } } }),

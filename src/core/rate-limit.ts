@@ -18,8 +18,7 @@ export type RateDecision = { allowed: true } | { allowed: false; reason: RateLim
 
 const CONFIRM_WINDOW_MS = 60_000;
 
-/** The all-toggles scope (כבה/הדלק הכל): 1 prompt per 60s across all senders. */
-const ALL_TOGGLES_WINDOW_MS = 60_000;
+/** The all-toggles scope (כבה/הדלק הכל): one confirmed action per interval. */
 const ALL_TOGGLES_MAX = 1;
 
 /** A sliding-window counter using a list of event timestamps. */
@@ -92,12 +91,14 @@ export class RateLimiter {
   }
 
   /**
-   * The all-toggles scope, on top of the normal command caps: switching every
-   * light and switch at once is limited to 1 prompt per 60s across all senders
-   * (which also bounds each sender), so it can't cycle relays or loads.
+   * The all-toggles scope, on top of the normal command caps: actually switching
+   * every light and switch (a confirmed כן) is limited to one per `intervalMs`
+   * across all senders (which also bounds each sender), so it can't cycle relays
+   * or loads. An interval of 0 disables the limit.
    */
-  allowAllToggles(): RateDecision {
-    if (!this.allToggles.tryHit(this.now(), ALL_TOGGLES_MAX, ALL_TOGGLES_WINDOW_MS)) {
+  allowAllToggles(intervalMs: number): RateDecision {
+    if (intervalMs <= 0) return { allowed: true };
+    if (!this.allToggles.tryHit(this.now(), ALL_TOGGLES_MAX, intervalMs)) {
       return { allowed: false, reason: 'rate-limited' };
     }
     return { allowed: true };

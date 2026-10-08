@@ -72,6 +72,7 @@ scopes:
   # light plus switches marked all_on. Both ask כן/לא first. Covers are never included.
   all_toggles:
     word: "הכל"
+    min_interval_s: 10      # optional: min time between two confirmed actions (0 = off)
 
 # IMPORTANT: these scripts MUST themselves refuse to move a cover in the wrong
 # direction (e.g. a close-to-30 on a cover already at 20). For a single-cover
