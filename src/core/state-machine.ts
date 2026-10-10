@@ -371,7 +371,13 @@ export class CommandStateMachine {
   }
 
   private reached(verb: Verb, ref: EntityRef, state: string, position?: number): boolean {
-    return ref.target ? reachesPosition(ref.target, position) : this.reachesTarget(verb, state);
+    if (ref.target) return reachesPosition(ref.target, position);
+    // HA reports a cover `open` at any position above 0, so a partly open cover is
+    // not yet at a full open; judge by position when the cover reports one.
+    if (ref.type === 'cover' && verb === 'open' && typeof position === 'number') {
+      return state === 'open' && position === 100;
+    }
+    return this.reachesTarget(verb, state);
   }
 
   private reachesTarget(verb: Verb, observed: string): boolean {
