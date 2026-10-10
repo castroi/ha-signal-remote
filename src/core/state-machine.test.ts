@@ -496,6 +496,77 @@ describe('CommandStateMachine — per-device completion', () => {
     expect(effectKinds(cover)).toEqual(['issue-cover', 'reply-success']);
   });
 
+  it('G: a partly open cover is not done for a full open', () => {
+    const sm = machine();
+    const r = sm.submit({
+      commandId: 'g4',
+      sourceUuid: 'u1',
+      verb: 'open',
+      entity: COVER,
+      snapshot: new Map([[COVER.entityId, { state: 'open', position: 40 }]]),
+    });
+    expect(effectKinds(r)).toEqual(['issue-cover', 'reply-progress']);
+    expect(sm.observeState(COVER.entityId, 'open', 70)).toEqual([]);
+    expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([
+      { kind: 'reply-success', commandId: 'g4' },
+    ]);
+  });
+
+  it('G: a fully open cover is done for a full open', () => {
+    const sm = machine();
+    const r = sm.submit({
+      commandId: 'g5',
+      sourceUuid: 'u1',
+      verb: 'open',
+      entity: COVER,
+      snapshot: new Map([[COVER.entityId, { state: 'open', position: 100 }]]),
+    });
+    expect(effectKinds(r)).toEqual(['issue-cover', 'reply-success']);
+  });
+
+  it('a full open settles only when the live position reaches 100', () => {
+    const sm = machine();
+    sm.submit({ commandId: 'o1', sourceUuid: 'u1', verb: 'open', entity: COVER });
+    expect(sm.observeState(COVER.entityId, 'open', 40)).toEqual([]);
+    expect(sm.observeState(COVER.entityId, 'open', 95)).toEqual([]);
+    expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([
+      { kind: 'reply-success', commandId: 'o1' },
+    ]);
+  });
+
+  it('a full open on a cover with no position falls back to the state string', () => {
+    const sm = machine();
+    const r = sm.submit({
+      commandId: 'o2',
+      sourceUuid: 'u1',
+      verb: 'open',
+      entity: COVER,
+      snapshot: new Map([[COVER.entityId, { state: 'open' }]]),
+    });
+    expect(effectKinds(r)).toEqual(['issue-cover', 'reply-success']);
+
+    sm.submit({ commandId: 'o3', sourceUuid: 'u1', verb: 'open', entity: COVER2 });
+    expect(sm.observeState(COVER2.entityId, 'open')).toEqual([
+      { kind: 'reply-success', commandId: 'o3' },
+    ]);
+  });
+
+  it('a close still settles on the closed state regardless of position', () => {
+    const sm = machine();
+    sm.submit({ commandId: 'o4', sourceUuid: 'u1', verb: 'close', entity: COVER });
+    expect(sm.observeState(COVER.entityId, 'closed', 5)).toEqual([
+      { kind: 'reply-success', commandId: 'o4' },
+    ]);
+  });
+
+  it('a full open with a null live position falls back to the state string', () => {
+    const sm = machine();
+    sm.submit({ commandId: 'o5', sourceUuid: 'u1', verb: 'open', entity: COVER });
+    expect(sm.observeState(COVER.entityId, 'open', null as unknown as number)).toEqual([
+      { kind: 'reply-success', commandId: 'o5' },
+    ]);
+  });
+
   it('G: a preset device already within tolerance per the snapshot is done', () => {
     const sm = machine();
     const r = sm.submit({

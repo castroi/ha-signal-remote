@@ -98,6 +98,47 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
     expect(h.sends.some((s) => s.message === 'בוצע')).toBe(true);
   });
 
+  it.each(['פתח סלון', 'הרם סלון'])(
+    '%s on a partly open cover calls open_cover and waits for 100 before בוצע',
+    async (command) => {
+      const partlyOpen = async (): Promise<ReadonlyMap<string, EntitySnapshot>> =>
+        new Map([['cover.living_room', { state: 'open', position: 40 }]]);
+      const h = harness(undefined, undefined, partlyOpen);
+      h.bridge.onWsConnected();
+      h.nowRef.t += 11_000;
+
+      await h.bridge.handleEnvelope(envelope(command, h.nowRef));
+
+      expect(h.haCalls).toContainEqual({ entityId: 'cover.living_room', verb: 'open' });
+      expect(h.sends.map((s) => s.message)).toEqual(['מבצע…']);
+
+      await h.bridge.onStateChanged('cover.living_room', 'open', 100);
+      expect(h.sends.map((s) => s.message)).toEqual(['מבצע…', 'בוצע']);
+    },
+  );
+
+  it('פתח תריסים calls open_cover only for the covers not already fully open', async () => {
+    const mixed = async (): Promise<ReadonlyMap<string, EntitySnapshot>> =>
+      new Map([
+        ['cover.living_room', { state: 'open', position: 40 }],
+        ['cover.kitchen', { state: 'open', position: 100 }],
+        ['cover.kids_room', { state: 'closed', position: 0 }],
+        ['cover.parents_room', { state: 'open', position: 100 }],
+      ]);
+    const h = harness(undefined, undefined, mixed);
+    h.bridge.onWsConnected();
+    h.nowRef.t += 11_000;
+
+    await h.bridge.handleEnvelope(envelope('פתח תריסים', h.nowRef));
+    h.nowRef.t += 1;
+    await h.bridge.handleEnvelope(envelope('כן', h.nowRef));
+
+    expect(h.haCalls.filter((c) => c.verb === 'open').map((c) => c.entityId).sort()).toEqual([
+      'cover.kids_room',
+      'cover.living_room',
+    ]);
+  });
+
   it('emits "reinitialized" exactly once across the session', async () => {
     const h = harness();
     h.bridge.onWsConnected();
