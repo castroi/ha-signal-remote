@@ -22,7 +22,9 @@
  * - Batches are confirm-gated: `pending_confirm`, 20s expiry, bound to
  *   (same UUID + same pending action + live window).
  * - A device already at its target per the pre-issue snapshot is done at once —
- *   HA emits no state_changed for a no-op, so waiting would only time out.
+ *   HA emits no state_changed for a no-op, so waiting would only time out. A full
+ *   cover open is the exception: its call is not cancelled by state events, and one
+ *   that started at 100 needs an observed `opening` before an `open` at 100 counts.
  */
 
 import type { EntitySnapshot } from './status.js';
@@ -133,6 +135,10 @@ interface CommandRecord {
   outcomes: Map<string, EntityOutcome>;
   /** Per-device completion deadlines, only for devices still pending. */
   completionDeadlines: Map<string, number>;
+  /** Full-open covers whose HA call has not gone out; their events are ignored. */
+  undispatched: Set<string>;
+  /** Full-open covers that started at 100; they must report `opening` before settling. */
+  awaitingMotion: Set<string>;
   /** Deadline for the pending-confirm expiry. */
   confirmDeadline: number | undefined;
   /** When the record reached a terminal state (for `prune()`). */
@@ -152,7 +158,7 @@ interface SubmitArgs {
   readonly sourceUuid: string;
   readonly verb: Verb;
   readonly entity: EntityRef;
-  /** Live states read just before issuing; devices already at target settle at once. */
+  /** Live states read just before issuing; devices already at target settle at once, except a full cover open. */
   readonly snapshot?: ReadonlyMap<string, EntitySnapshot> | undefined;
 }
 
@@ -191,6 +197,11 @@ export class CommandStateMachine {
       rec?.state === 'pending_confirm' &&
       (rec.confirmDeadline === undefined || this.now() <= rec.confirmDeadline)
     );
+  }
+
+  /** The HA call for this device is going out now; events may settle it from here on. */
+  markDispatched(commandId: string, entityId: string): void {
+    this.commands.get(commandId)?.undispatched.delete(entityId);
   }
 
   /** True while this command is still waiting on this device (issued, not settled). */
@@ -271,6 +282,8 @@ export class CommandStateMachine {
       state: 'pending_confirm',
       outcomes: new Map(),
       completionDeadlines: new Map(),
+      undispatched: new Set(),
+      awaitingMotion: new Set(),
       confirmDeadline: undefined,
       resolvedAt: undefined,
       batch: undefined,
@@ -316,12 +329,23 @@ export class CommandStateMachine {
           verb: rec.verb as ToggleVerb,
         });
       }
+      // A cover's reported position can be wrong (commonly estimated from motor run
+      // time), so a full open always runs: a false 100 must not block the command.
+      const fullOpen = entity.type === 'cover' && rec.verb === 'open' && !entity.target;
       const current = snapshot?.get(entity.entityId);
-      if (current && this.reached(rec.verb, entity, current.state, current.position)) {
+      if (!fullOpen && current && this.reached(rec.verb, entity, current.state, current.position)) {
         rec.outcomes.set(entity.entityId, 'done');
       } else {
         rec.outcomes.set(entity.entityId, 'pending');
         rec.completionDeadlines.set(entity.entityId, now + entity.completionTimeoutMs);
+        if (fullOpen) {
+          // Until the call goes out, an event must not settle the device and cancel it.
+          rec.undispatched.add(entity.entityId);
+          // Already reporting fully open: `open` at 100 proves nothing until it moves.
+          if (current?.position === 100 || (current?.position === undefined && current?.state === 'open')) {
+            rec.awaitingMotion.add(entity.entityId);
+          }
+        }
       }
     }
 
@@ -361,6 +385,11 @@ export class CommandStateMachine {
     // Preemption guarantees at most one issued command is pending on a device.
     for (const rec of this.commands.values()) {
       if (rec.state !== 'issued' || rec.outcomes.get(entityId) !== 'pending') continue;
+      if (rec.undispatched.has(entityId)) break;
+      if (rec.awaitingMotion.has(entityId)) {
+        if (observedState === 'opening') rec.awaitingMotion.delete(entityId);
+        break;
+      }
       const ref = rec.entities.find((e) => e.entityId === entityId)!;
       if (this.reached(rec.verb, ref, observedState, observedPosition)) {
         this.settle(rec, entityId, 'done', effects);
