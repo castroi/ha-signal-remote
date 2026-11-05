@@ -512,7 +512,7 @@ describe('CommandStateMachine — per-device completion', () => {
     ]);
   });
 
-  it('G: a fully open cover is done for a full open', () => {
+  it('a full open still runs when the snapshot already says 100', () => {
     const sm = machine();
     const r = sm.submit({
       commandId: 'g5',
@@ -520,6 +520,38 @@ describe('CommandStateMachine — per-device completion', () => {
       verb: 'open',
       entity: COVER,
       snapshot: new Map([[COVER.entityId, { state: 'open', position: 100 }]]),
+    });
+    expect(effectKinds(r)).toEqual(['issue-cover', 'reply-progress']);
+    expect(sm.stateOf('g5')).toBe('issued');
+    expect(sm.observeState(COVER.entityId, 'opening', 100)).toEqual([]);
+    expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([
+      { kind: 'reply-success', commandId: 'g5' },
+    ]);
+  });
+
+  it('a full open from a snapshot at 100 times out, not succeeds, if HA stays silent', () => {
+    const now = { t: 0 };
+    const sm = machine(now);
+    sm.submit({
+      commandId: 'g6',
+      sourceUuid: 'u1',
+      verb: 'open',
+      entity: COVER,
+      snapshot: new Map([[COVER.entityId, { state: 'open', position: 100 }]]),
+    });
+    now.t = COVER.completionTimeoutMs + 1;
+    expect(effectKinds(sm.tick())).toContain('reply-timeout');
+    expect(sm.stateOf('g6')).toBe('timeout');
+  });
+
+  it('a close from a snapshot at its target is still done at once', () => {
+    const sm = machine();
+    const r = sm.submit({
+      commandId: 'g7',
+      sourceUuid: 'u1',
+      verb: 'close',
+      entity: COVER,
+      snapshot: new Map([[COVER.entityId, { state: 'closed', position: 0 }]]),
     });
     expect(effectKinds(r)).toEqual(['issue-cover', 'reply-success']);
   });
@@ -543,7 +575,10 @@ describe('CommandStateMachine — per-device completion', () => {
       entity: COVER,
       snapshot: new Map([[COVER.entityId, { state: 'open' }]]),
     });
-    expect(effectKinds(r)).toEqual(['issue-cover', 'reply-success']);
+    expect(effectKinds(r)).toEqual(['issue-cover', 'reply-progress']);
+    expect(sm.observeState(COVER.entityId, 'open')).toEqual([
+      { kind: 'reply-success', commandId: 'o2' },
+    ]);
 
     sm.submit({ commandId: 'o3', sourceUuid: 'u1', verb: 'open', entity: COVER2 });
     expect(sm.observeState(COVER2.entityId, 'open')).toEqual([

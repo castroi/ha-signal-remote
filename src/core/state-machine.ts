@@ -22,7 +22,8 @@
  * - Batches are confirm-gated: `pending_confirm`, 20s expiry, bound to
  *   (same UUID + same pending action + live window).
  * - A device already at its target per the pre-issue snapshot is done at once —
- *   HA emits no state_changed for a no-op, so waiting would only time out.
+ *   HA emits no state_changed for a no-op, so waiting would only time out. A full
+ *   cover open is the exception: it is always sent and waits for an observed state.
  */
 
 import type { EntitySnapshot } from './status.js';
@@ -316,8 +317,11 @@ export class CommandStateMachine {
           verb: rec.verb as ToggleVerb,
         });
       }
+      // A cover's reported position can be wrong (commonly estimated from motor run
+      // time), so a full open always runs: a false 100 must not block the command.
+      const alwaysRuns = entity.type === 'cover' && rec.verb === 'open' && !entity.target;
       const current = snapshot?.get(entity.entityId);
-      if (current && this.reached(rec.verb, entity, current.state, current.position)) {
+      if (!alwaysRuns && current && this.reached(rec.verb, entity, current.state, current.position)) {
         rec.outcomes.set(entity.entityId, 'done');
       } else {
         rec.outcomes.set(entity.entityId, 'pending');

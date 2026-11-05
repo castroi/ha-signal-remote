@@ -117,7 +117,26 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
     },
   );
 
-  it('פתח תריסים calls open_cover only for the covers not already fully open', async () => {
+  it.each(['פתח סלון', 'הרם סלון'])(
+    '%s calls open_cover even when HA already reports 100',
+    async (command) => {
+      const fullyOpen = async (): Promise<ReadonlyMap<string, EntitySnapshot>> =>
+        new Map([['cover.living_room', { state: 'open', position: 100 }]]);
+      const h = harness(undefined, undefined, fullyOpen);
+      h.bridge.onWsConnected();
+      h.nowRef.t += 11_000;
+
+      await h.bridge.handleEnvelope(envelope(command, h.nowRef));
+
+      expect(h.haCalls).toContainEqual({ entityId: 'cover.living_room', verb: 'open' });
+      expect(h.sends.map((s) => s.message)).toEqual(['מבצע…']);
+
+      await h.bridge.onStateChanged('cover.living_room', 'open', 100);
+      expect(h.sends.map((s) => s.message)).toEqual(['מבצע…', 'בוצע']);
+    },
+  );
+
+  it('פתח תריסים calls open_cover for every cover, whatever position HA reports', async () => {
     const mixed = async (): Promise<ReadonlyMap<string, EntitySnapshot>> =>
       new Map([
         ['cover.living_room', { state: 'open', position: 40 }],
@@ -135,7 +154,9 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
 
     expect(h.haCalls.filter((c) => c.verb === 'open').map((c) => c.entityId).sort()).toEqual([
       'cover.kids_room',
+      'cover.kitchen',
       'cover.living_room',
+      'cover.parents_room',
     ]);
   });
 

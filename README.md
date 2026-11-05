@@ -184,7 +184,7 @@ A message is `verb + entity`, e.g. `סגור סלון` (close salon) or `פתח 
 | `סטטוס` | Status — always answered for authorized senders: WS / clock / kill-switch / covers-enabled state, then every configured device (covers as position %, lights/switches as on/off; `לא זמין` when unreadable) |
 | `עזרה`, `תפריט` | Help / menu |
 
-Cover feedback is two-stage (`מבצע…` then completion); a single light or switch is single-stage. A confirmed batch (`תריסים`, `הכל`) sends one `מבצע…` and, once every device has finished or timed out, one summary naming any device that didn't (`בוצע, חוץ מ: …`). A command that exceeds its per-entity `completion_timeout_ms` returns a timeout + manual-check reply — never a false success; a device already in the target state counts as done at once. Sending a new command for a device already in motion preempts it there (covers: stop, then the new direction).
+Cover feedback is two-stage (`מבצע…` then completion); a single light or switch is single-stage. A confirmed batch (`תריסים`, `הכל`) sends one `מבצע…` and, once every device has finished or timed out, one summary naming any device that didn't (`בוצע, חוץ מ: …`). A command that exceeds its per-entity `completion_timeout_ms` returns a timeout + manual-check reply — never a false success; a device already in the target state counts as done at once, except that a full cover open (`פתח`, `פתח תריסים`) is always sent, because a cover's reported position can be wrong; on a cover that really is fully open, it times out with the manual-check reply if HA reports no change. Sending a new command for a device already in motion preempts it there (covers: stop, then the new direction).
 
 ---
 
