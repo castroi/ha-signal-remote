@@ -506,6 +506,7 @@ describe('CommandStateMachine — per-device completion', () => {
       snapshot: new Map([[COVER.entityId, { state: 'open', position: 40 }]]),
     });
     expect(effectKinds(r)).toEqual(['issue-cover', 'reply-progress']);
+    sm.markDispatched('g4', COVER.entityId);
     expect(sm.observeState(COVER.entityId, 'open', 70)).toEqual([]);
     expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([
       { kind: 'reply-success', commandId: 'g4' },
@@ -523,6 +524,9 @@ describe('CommandStateMachine — per-device completion', () => {
     });
     expect(effectKinds(r)).toEqual(['issue-cover', 'reply-progress']);
     expect(sm.stateOf('g5')).toBe('issued');
+    sm.markDispatched('g5', COVER.entityId);
+    expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([]); // no motion yet
+    expect(sm.isPending('g5', COVER.entityId)).toBe(true);
     expect(sm.observeState(COVER.entityId, 'opening', 100)).toEqual([]);
     expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([
       { kind: 'reply-success', commandId: 'g5' },
@@ -559,6 +563,7 @@ describe('CommandStateMachine — per-device completion', () => {
   it('a full open settles only when the live position reaches 100', () => {
     const sm = machine();
     sm.submit({ commandId: 'o1', sourceUuid: 'u1', verb: 'open', entity: COVER });
+    sm.markDispatched('o1', COVER.entityId);
     expect(sm.observeState(COVER.entityId, 'open', 40)).toEqual([]);
     expect(sm.observeState(COVER.entityId, 'open', 95)).toEqual([]);
     expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([
@@ -576,11 +581,15 @@ describe('CommandStateMachine — per-device completion', () => {
       snapshot: new Map([[COVER.entityId, { state: 'open' }]]),
     });
     expect(effectKinds(r)).toEqual(['issue-cover', 'reply-progress']);
+    sm.markDispatched('o2', COVER.entityId);
+    expect(sm.observeState(COVER.entityId, 'open')).toEqual([]); // no motion yet
+    expect(sm.observeState(COVER.entityId, 'opening')).toEqual([]);
     expect(sm.observeState(COVER.entityId, 'open')).toEqual([
       { kind: 'reply-success', commandId: 'o2' },
     ]);
 
     sm.submit({ commandId: 'o3', sourceUuid: 'u1', verb: 'open', entity: COVER2 });
+    sm.markDispatched('o3', COVER2.entityId);
     expect(sm.observeState(COVER2.entityId, 'open')).toEqual([
       { kind: 'reply-success', commandId: 'o3' },
     ]);
@@ -597,6 +606,7 @@ describe('CommandStateMachine — per-device completion', () => {
   it('a full open with a null live position falls back to the state string', () => {
     const sm = machine();
     sm.submit({ commandId: 'o5', sourceUuid: 'u1', verb: 'open', entity: COVER });
+    sm.markDispatched('o5', COVER.entityId);
     expect(sm.observeState(COVER.entityId, 'open', null as unknown as number)).toEqual([
       { kind: 'reply-success', commandId: 'o5' },
     ]);
@@ -612,6 +622,57 @@ describe('CommandStateMachine — per-device completion', () => {
       snapshot: new Map([[COVER.entityId, { state: 'open', position: 31 }]]),
     });
     expect(effectKinds(r)).toContain('reply-success');
+  });
+
+  it('a preset open already within tolerance per the snapshot is done', () => {
+    const sm = machine();
+    const r = sm.submit({
+      commandId: 'g8',
+      sourceUuid: 'u1',
+      verb: 'open',
+      entity: COVER_TO_30,
+      snapshot: new Map([[COVER_TO_30.entityId, { state: 'open', position: 31 }]]),
+    });
+    expect(effectKinds(r)).toContain('reply-success');
+  });
+
+  it('a full open ignores every event until its call is dispatched', () => {
+    const sm = machine();
+    sm.submit({ commandId: 'g9', sourceUuid: 'u1', verb: 'open', entity: COVER });
+    expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([]);
+    expect(sm.isPending('g9', COVER.entityId)).toBe(true);
+    sm.markDispatched('g9', COVER.entityId);
+    expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([
+      { kind: 'reply-success', commandId: 'g9' },
+    ]);
+  });
+
+  it('an opening seen before dispatch does not count as motion after it', () => {
+    const sm = machine();
+    sm.submit({
+      commandId: 'g10',
+      sourceUuid: 'u1',
+      verb: 'open',
+      entity: COVER,
+      snapshot: new Map([[COVER.entityId, { state: 'open', position: 100 }]]),
+    });
+    sm.observeState(COVER.entityId, 'opening', 100);
+    sm.markDispatched('g10', COVER.entityId);
+    expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([]);
+    expect(sm.isPending('g10', COVER.entityId)).toBe(true);
+  });
+
+  it('a snapshot still moving at 100 also needs motion after the call', () => {
+    const sm = machine();
+    sm.submit({
+      commandId: 'g11',
+      sourceUuid: 'u1',
+      verb: 'open',
+      entity: COVER,
+      snapshot: new Map([[COVER.entityId, { state: 'opening', position: 100 }]]),
+    });
+    sm.markDispatched('g11', COVER.entityId);
+    expect(sm.observeState(COVER.entityId, 'open', 100)).toEqual([]);
   });
 
   it('one progress reply per issued batch, none when nothing is left pending', () => {

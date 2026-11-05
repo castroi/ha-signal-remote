@@ -131,6 +131,7 @@ describe('Bridge pipeline (design §5, go-live gate 4)', () => {
       expect(h.haCalls).toContainEqual({ entityId: 'cover.living_room', verb: 'open' });
       expect(h.sends.map((s) => s.message)).toEqual(['מבצע…']);
 
+      await h.bridge.onStateChanged('cover.living_room', 'opening', 100);
       await h.bridge.onStateChanged('cover.living_room', 'open', 100);
       expect(h.sends.map((s) => s.message)).toEqual(['מבצע…', 'בוצע']);
     },
@@ -1520,6 +1521,76 @@ describe('per-device completion through the bridge', () => {
     };
     return { bridge, sends, coverCalls, toggleCalls, nowRef, say };
   }
+
+  describe('full open when HA already reports 100', () => {
+    const ALL_AT_100 = new Map([
+      ['cover.living_room', { state: 'open', position: 100 }],
+      ['cover.kitchen', { state: 'open', position: 100 }],
+      ['cover.kids_room', { state: 'open', position: 100 }],
+      ['cover.parents_room', { state: 'open', position: 100 }],
+    ]);
+    const callCoverOf = (h: ReturnType<typeof batchHarness>) =>
+      (h.bridge as unknown as { haRest: { callCover: ReturnType<typeof vi.fn> } }).haRest.callCover;
+
+    it('a second פתח still calls open_cover when the stop reports open at 100', async () => {
+      const h = batchHarness({ states: ALL_AT_100 });
+      await h.say('פתח סלון');
+      callCoverOf(h).mockImplementationOnce(async (entityId: string, verb: string) => {
+        h.coverCalls.push({ entityId, verb });
+        await h.bridge.onStateChanged('cover.living_room', 'open', 100);
+        return { ok: true } as const;
+      });
+      await h.say('פתח סלון');
+      expect(h.coverCalls.map((c) => c.verb)).toEqual(['open', 'stop', 'open']);
+      expect(h.sends).not.toContain('בוצע');
+
+      await h.bridge.onStateChanged('cover.living_room', 'opening', 100);
+      await h.bridge.onStateChanged('cover.living_room', 'open', 100);
+      expect(h.sends.at(-1)).toBe('בוצע');
+    });
+
+    it('a batch calls every cover when one reports open at 100 before its turn', async () => {
+      const h = batchHarness({ states: ALL_AT_100 });
+      await h.say('פתח תריסים');
+      callCoverOf(h).mockImplementationOnce(async (entityId: string, verb: string) => {
+        h.coverCalls.push({ entityId, verb });
+        await h.bridge.onStateChanged('cover.kitchen', 'open', 100);
+        return { ok: true } as const;
+      });
+      await h.say('כן');
+      expect(h.coverCalls.filter((c) => c.verb === 'open').map((c) => c.entityId).sort()).toEqual([
+        'cover.kids_room',
+        'cover.kitchen',
+        'cover.living_room',
+        'cover.parents_room',
+      ]);
+    });
+
+    it('an unrelated open at 100 leaves the cover tracked, so the kill switch stops it', async () => {
+      const h = batchHarness({ states: ALL_AT_100 });
+      await h.say('פתח סלון');
+      await h.bridge.onStateChanged('cover.living_room', 'open', 100);
+      expect(h.sends).not.toContain('בוצע');
+      h.bridge.engageKill();
+      expect(h.coverCalls).toContainEqual({ entityId: 'cover.living_room', verb: 'stop' });
+    });
+
+    it('a preset verb with no configured target falls through to a full open', async () => {
+      const h = batchHarness({ states: ALL_AT_100 });
+      await h.say('העלה ילדים');
+      expect(h.coverCalls).toContainEqual({ entityId: 'cover.kids_room', verb: 'open' });
+      expect(h.sends).toEqual(['מבצע…']);
+    });
+
+    it('a batch reports the covers as unresponsive if HA stays silent', async () => {
+      const h = batchHarness({ states: ALL_AT_100 });
+      await h.say('פתח תריסים');
+      await h.say('כן');
+      h.nowRef.t += 36_000;
+      await h.bridge.tick();
+      expect(h.sends.at(-1)).toMatch(/^הפעולה נכשלה: .*לא הגיב/);
+    });
+  });
 
   it('G: a light already in the target state acks immediately', async () => {
     const h = batchHarness({ states: new Map([['light.garden', { state: 'off' }]]) });

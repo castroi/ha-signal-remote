@@ -490,7 +490,8 @@ export class Bridge {
     }
 
     // Snapshot the devices so any already at the target count as done (HA emits
-    // nothing for a no-op). Read it before the gate re-checks below so no await
+    // nothing for a no-op), except a full cover open, which always runs. Read it
+    // before the gate re-checks below so no await
     // separates those checks from the confirm.
     const snapshot = await this.haRest.getStates(this.stateMachine.entityIdsOf(commandId));
 
@@ -848,6 +849,7 @@ export class Bridge {
       }
       switch (e.kind) {
         case 'issue-cover': {
+          this.stateMachine.markDispatched(e.commandId, e.entityId);
           const r = await this.haRest.callCover(e.entityId, e.verb);
           if (!r.ok) {
             // Fix item 4: use per-entity failure so one failed cover does not
